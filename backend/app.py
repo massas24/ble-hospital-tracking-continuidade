@@ -19,12 +19,19 @@ import functools
 import secrets
 # HTTP client used to POST events to external system (Mirth)
 import requests
-
+# Used to read the Mirth endpoint from an environment variable
+import os
+# Generates a unique id per ingestion batch, for raw detection logging
+import uuid
 #------------------------------------------------------------------------------
 # Initialize Flask app and enable CORS
 app = Flask(__name__)  # Create Flask application instance
 CORS(app)  # Allow cross-origin requests (used by the React frontend)
 app.secret_key = "change_this_secret"  # Secret key used by Flask sessions (should be changed)
+
+# Mirth endpoint - override with the MIRTH_URL env var (e.g. for local testing
+# against mock_mirth.py); defaults to the real production Mirth server
+MIRTH_URL = os.environ.get("MIRTH_URL", "http://192.168.1.117:6661")
 
 #==============================================================================
 # SECTION 2: DATABASE CONFIGURATION
@@ -39,23 +46,36 @@ beacon_history = db["beacon_history"]  # Stores historical beacon sightings (app
 beacon_latest = db["beacon_latest"]  # Stores the latest known state per beacon (upsert)
 esp_mapping = db["esp_mapping"]  # Maps ESP device IDs to room names
 beacon_whitelist = db["beacon_whitelist"]  # MAC addresses allowed to be tracked
+# Raw, unprocessed per-node detections (append-only) - kept alongside
+# beacon_history/beacon_latest for offline experimentation with different
+# location-decision methods (median, hysteresis, persistence, ...)
+raw_detections = db["raw_detections"]
 
 # Ensure indexes for performance and uniqueness
 beacon_latest.create_index("mac", unique=True)  # Ensure one document per MAC
 beacon_history.create_index([("mac", ASCENDING), ("time", ASCENDING)])  # Composite index for queries
+raw_detections.create_index([("mac", ASCENDING), ("time", ASCENDING)])  # Composite index for queries
+raw_detections.create_index("batch_id")  # Group all detections from the same ingestion batch
 
 # In-memory state for currently seen devices (used between requests)
 live_devices = []  # List view of devices currently reported
 # Configure local timezone for timestamping
 LOCAL_TIMEZONE = pytz.timezone("Europe/Lisbon")  # Use Lisbon timezone for local timestamps
 
-#============================================================================== 
+#==============================================================================
 # BEACON LOCATION AND SENT STATUS STATE
 #==============================================================================
-# Tracks last known room for a beacon by MAC
-beacon_locations = {}  # { mac: room }
+# Minimum RSSI improvement (in dBm) a new room's reading must have over the
+# currently stored room's reading before a room change is accepted (hysteresis)
+HYSTERESIS_MARGIN = 5
+# Tracks last known room and RSSI for a beacon by MAC
+beacon_locations = {}  # { mac: {"room": ..., "rssi": ...} }
 # Tracks beacons that were manually sent (unused/commented state)
 manually_sent_beacons = {}
+
+# Manually-set label for the experimental trial currently running, stamped
+# onto every raw_detections document until changed via /api/experiment
+current_experiment_id = None
 
 #==============================================================================
 # SECTION 3: AUTHENTICATION MIDDLEWARE
@@ -80,33 +100,59 @@ def auth_required(f):
 # Endpoint to create a new admin user
 @app.route("/api/signup", methods=["POST"])
 def signup():
-    data = request.json  # Parse JSON body
-    username = data.get("username", "").strip()  # Extract username and normalize
-    password = data.get("password", "")  # Extract password
-    # If user already exists return 400
+    data = request.get_json()
+
+    # Validate JSON
+    if not isinstance(data, dict):
+        return jsonify({
+            "error": "Invalid JSON format. Expected object."
+        }), 400
+
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    # Validate fields
+    if not username or not password:
+        return jsonify({
+            "error": "Username and password are required"
+        }), 400
+
+    # Check existing user
     if admin_users.find_one({"username": username}):
-        return jsonify({"error": "User already exists"}), 400
-    # Insert new user with hashed password
+        return jsonify({
+            "error": "User already exists"
+        }), 400
+
+    # Store hashed password
     admin_users.insert_one({
         "username": username,
         "password": generate_password_hash(password)
     })
-    # Return success response
-    return jsonify({"status": "ok", "message": "Signup successful"})
 
+    return jsonify({
+        "status": "ok",
+        "message": "Signup successful"
+    })
 # Endpoint to login an admin user
 @app.route("/api/login", methods=["POST"])
 def login():
-    data = request.json  # Parse JSON body
-    username = data.get("username", "").strip()
-    password = data.get("password", "")
-    user = admin_users.find_one({"username": username})  # Look up user
-    # Validate password and user existence
+    data = request.get_json()
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON format"}), 400
+
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    user = admin_users.find_one({"username": username})
+
     if not user or not check_password_hash(user["password"], password):
         return jsonify({"error": "Invalid credentials"}), 401
-    # Return success and the username
-    return jsonify({"status": "ok", "username": username})
 
+    return jsonify({
+        "status": "ok",
+        "username": username
+    })
 # Endpoint to initiate password reset flow
 @app.route("/api/forgot-password", methods=["POST"])
 def forgot_password():
@@ -207,6 +253,22 @@ def delete_room(esp_id):
     return jsonify({"status": "ok"})
 
 #==============================================================================
+# SECTION 6B: EXPERIMENT LABELING (for raw_detections)
+#==============================================================================
+# Get/set the experiment_id manually stamped onto raw_detections while an
+# experimental trial is running. Cleared by setting an empty/missing value.
+@app.route("/api/experiment", methods=["GET", "POST"])
+@auth_required
+def experiment_api():
+    global current_experiment_id
+    if request.method == "POST":
+        data = request.json or {}
+        current_experiment_id = data.get("experiment_id") or None
+        return jsonify({"status": "ok", "experiment_id": current_experiment_id})
+    # On GET return the currently active experiment_id (may be null)
+    return jsonify({"experiment_id": current_experiment_id})
+
+#==============================================================================
 # SECTION 7: DEVICE DATA ENDPOINTS
 #==============================================================================
 # Returns the in-memory list of live devices detected in the last ingestion
@@ -263,6 +325,9 @@ def bledata():
     # Timestamp for all incoming devices
     now_dt = datetime.now(LOCAL_TIMEZONE)
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    # One id per ingestion batch (this POST request), so raw detections from
+    # the same request can be grouped/correlated later
+    batch_id = str(uuid.uuid4())
     # Use a persistent attribute on the function to keep a dict between calls
     if not hasattr(bledata, "live_devices_dict"):
         bledata.live_devices_dict = {}
@@ -283,6 +348,18 @@ def bledata():
 
         # Only persist and notify for whitelisted MACs
         if beacon_whitelist.find_one({"mac": mac}):
+            # Append raw, unprocessed detection for offline experimentation
+            # (kept separate from beacon_history/beacon_latest, which already
+            # reflect the hysteresis-based room decision)
+            raw_detections.insert_one({
+                "mac": mac,
+                "esp_id": device.get("esp_id", ""),
+                "room": device["room"],
+                "rssi": device.get("rssi", ""),
+                "time": now_str,
+                "batch_id": batch_id,
+                "experiment_id": current_experiment_id,
+            })
             # Append to historical collection
             beacon_history.insert_one({
                 "esp_id": device.get("esp_id", ""),
@@ -305,37 +382,63 @@ def bledata():
                 }},
                 upsert=True
             )
-            # Location-change detection and message to Mirth if room changed
-            if mac in beacon_locations and beacon_locations[mac] != device["room"]:
-                old_room = beacon_locations[mac]
-                new_room = device["room"]
-                mirth_url = "http://192.168.1.117:6661"  # Destination for notifications
-                movement_payload = {
-                    "event": "beacon_location_change",
-                    "summary": f"Beacon {mac} moved from {old_room} to {new_room}",
-                    "beacon": {
-                        "esp_id": device.get("esp_id", ""),
-                        "esp_name": device.get("esp_name", ""),
-                        "room": new_room,
-                        "mac": mac,
-                        "rssi": device.get("rssi", ""),
-                        "time": now_str
-                    }
-                }
-                try:
-                    # Post movement event to Mirth with a short timeout
-                    requests.post(
-                        mirth_url,
-                        json=movement_payload,
-                        timeout=5,
-                        headers={'Content-Type': 'application/json'}
-                    )
-                except requests.exceptions.RequestException as e:
-                    # Log failure but do not fail the whole ingestion
-                    print(f"✗ Failed to send location change for {mac} to Mirth: {str(e)}")
+            # Location-change detection with hysteresis: only accept a room
+            # change if the new RSSI is at least HYSTERESIS_MARGIN dBm
+            # stronger than the RSSI stored for the current room
+            new_room = device["room"]
+            new_rssi = device.get("rssi")
+            current = beacon_locations.get(mac)
 
-            # Update stored location regardless (latest observed room)
-            beacon_locations[mac] = device["room"]
+            if current is not None and current["room"] != new_room:
+                stored_rssi = current.get("rssi")
+                strong_enough = (
+                    isinstance(new_rssi, (int, float))
+                    and isinstance(stored_rssi, (int, float))
+                    and new_rssi >= stored_rssi + HYSTERESIS_MARGIN
+                )
+                if strong_enough:
+                    old_room = current["room"]
+                    mirth_url = MIRTH_URL  # Destination for notifications
+                    movement_payload = {
+                        "event": "beacon_location_change",
+                        "summary": f"Beacon {mac} moved from {old_room} to {new_room}",
+                        "beacon": {
+                            "esp_id": device.get("esp_id", ""),
+                            "esp_name": device.get("esp_name", ""),
+                            "room": new_room,
+                            "mac": mac,
+                            "rssi": device.get("rssi", ""),
+                            "time": now_str
+                        }
+                    }
+                    try:
+                        # Post movement event to Mirth with a short timeout
+                        requests.post(
+                            mirth_url,
+                            json=movement_payload,
+                            timeout=5,
+                            headers={'Content-Type': 'application/json'}
+                        )
+                    except requests.exceptions.RequestException as e:
+                        # Log failure but do not fail the whole ingestion
+                        print(f"✗ Failed to send location change for {mac} to Mirth: {str(e)}")
+
+                    # Accepted: update stored room/RSSI to the new reading
+                    beacon_locations[mac] = {"room": new_room, "rssi": new_rssi}
+                else:
+                    # Rejected: not enough signal improvement yet - keep the
+                    # previously stored room/RSSI unchanged
+                    if isinstance(new_rssi, (int, float)) and isinstance(stored_rssi, (int, float)):
+                        required_rssi = stored_rssi + HYSTERESIS_MARGIN
+                        print(f"Histerese rejeitou mudança de {current['room']} para {new_room} "
+                              f"({mac}): RSSI insuficiente: novo={new_rssi}, necessário >={required_rssi}")
+                    else:
+                        print(f"Histerese rejeitou mudança de {current['room']} para {new_room} "
+                              f"({mac}): RSSI em falta ou inválido (novo={new_rssi}, guardado={stored_rssi})")
+            else:
+                # First sighting since startup, or still in the same room:
+                # (re)confirm the stored room and refresh the RSSI baseline
+                beacon_locations[mac] = {"room": new_room, "rssi": new_rssi}
  
     # Convert live data dict to a list for the /api/data endpoint
     live_devices = list(bledata.live_devices_dict.values())
@@ -353,7 +456,7 @@ def send_active_beacons_to_mirth():
     try:
         # Read latest-known beacons from DB
         active_beacons = list(beacon_latest.find({}, {"_id": 0}))
-        mirth_url = "http://192.168.1.117:6661"
+        mirth_url = MIRTH_URL
 
         beacons_to_send = []  # Accumulate payload
         sent_count = 0

@@ -41,7 +41,7 @@ function LoginSignupForm() {
   return (
     <div className="form-bg">
       <div className="center-card">
-        <form className="auth-form" onSubmit={handleSubmit}>
+        <form className="auth-form" onSubmit={showRecovery ? handleRecovery : handleSubmit}>
           <h2 style={{ fontSize: "2.1rem", fontWeight: 400, letterSpacing: "1px", marginBottom: "24px" }}>
             {mode === "login" ? "ADMIN LOGIN" : "ADMIN SIGNUP"}
           </h2>
@@ -79,18 +79,16 @@ function LoginSignupForm() {
             </>
           ) : (
             <div style={{ marginTop: 15 }}>
-              <form onSubmit={handleRecovery}>
-                <input
-                  type="text"
-                  placeholder="Username"
-                  value={recoveryInput}
-                  onChange={e => setRecoveryInput(e.target.value)}
-                  className="form-input"
-                  style={{ width: "90%", marginBottom: 10 }}
-                  required
-                />
-                <button type="submit" className="main-btn" style={{ width: "100%" }}>Recover</button>
-              </form>
+              <input
+                type="text"
+                placeholder="Username"
+                value={recoveryInput}
+                onChange={e => setRecoveryInput(e.target.value)}
+                className="form-input"
+                style={{ width: "90%", marginBottom: 10 }}
+                required
+              />
+              <button type="submit" className="main-btn" style={{ width: "100%" }}>Recover</button>
               <div style={{ color: "#abf", marginTop: 12 }}>{recoveryMsg}</div>
               <a href="#" style={{ fontSize: 13, marginTop: 9, display: "inline-block" }} onClick={() => setShowRecovery(false)}>Go back to login</a>
             </div>
