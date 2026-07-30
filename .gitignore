@@ -20,6 +20,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Generated analysis output (not source - see backend/analyze_room_decisions.py)
+/backend/analysis_output/
+/backend/plots/
+
 # Python
 __pycache__/
 *.py[cod]

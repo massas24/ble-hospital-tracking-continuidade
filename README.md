@@ -2,3 +2,164 @@ A real-time BLE tracking dashboard for hospitals using ESP32, Flask, React, and 
 
 System Architecture Data Flow Overview
 <img width="892" height="629" alt="image" src="https://github.com/user-attachments/assets/52840c47-c4e2-4312-bb6f-5abfcf5db626" />
+
+## Componentes
+
+- **`backend/`** — API Flask + MongoDB. Recebe deteções BLE dos nós ESP32, decide a localização (histerese ao vivo), guarda histórico e deteções brutas, envia eventos ao Mirth Connect.
+- **`frontend/`** — Dashboard React (login, gestão de whitelist/salas, histórico de beacons).
+- **`esp32-firmware/`** — Firmware Arduino/C++ para os nós ESP32 (scanner BLE + upload HTTP).
+- **`docs/`** — Guião experimental e proposta de continuidade do projeto.
+
+---
+
+## 1. Backend (Flask + MongoDB)
+
+### Pré-requisitos
+- Python 3.x instalado.
+- MongoDB a correr localmente, à escuta em `mongodb://localhost:27017` (instala o MongoDB Community Server e garante que o serviço `mongod` está ativo — no Windows, verifica em `services.msc` ou corre `mongod` manualmente).
+
+### Instalação
+```powershell
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Para correr o script de análise offline (`analyze_room_decisions.py`), instala também as dependências extra (pandas/matplotlib, mantidas separadas do backend de produção):
+```powershell
+pip install -r requirements-analysis.txt
+```
+
+### Variáveis de ambiente
+| Variável | Default | Para quê |
+|---|---|---|
+| `MIRTH_URL` | `http://192.168.1.117:6661` | Endpoint do Mirth Connect para onde os eventos de mudança de sala são enviados. Muda para o `mock_mirth.py` local durante testes (ver secção 4). |
+
+```powershell
+$env:MIRTH_URL = "http://127.0.0.1:6670"   # exemplo, para testar com o mock local
+python app.py
+```
+
+O servidor fica à escuta em `http://0.0.0.0:5000` (todas as interfaces de rede).
+
+### Verificar que está tudo a funcionar
+```powershell
+curl http://localhost:5000/api/data -H "X-User: teste"
+```
+Deve devolver `[]` (lista vazia) ou os dispositivos atualmente detetados, sem erro.
+
+---
+
+## 2. Frontend (React)
+
+### Pré-requisitos
+- **Node.js 18.x** (ex: 18.20.8) — o projeto usa `react-scripts` 5.0.1, que é uma versão mais antiga do Create React App; versões de Node muito recentes (20+) podem funcionar mas 18.x é a testada. Recomenda-se usar o [nvm-windows](https://github.com/coreybutler/nvm-windows) para gerir versões:
+```powershell
+nvm install 18.20.8
+nvm use 18.20.8
+```
+
+### Instalação
+```powershell
+cd frontend
+npm install
+npm start
+```
+Abre em `http://localhost:3000`.
+
+### Nota importante: proxy `127.0.0.1` em vez de `localhost`
+O `frontend/package.json` tem:
+```json
+"proxy": "http://127.0.0.1:5000",
+```
+**Não muda isto para `"http://localhost:5000"`** — no Windows, o Node.js resolve `localhost` preferencialmente para IPv6 (`::1`), mas o Flask só está à escuta em IPv4 (`0.0.0.0`). Isto causa o erro:
+```
+Proxy error: Could not proxy request /api/... from localhost:3000 to http://localhost:5000/ (ECONNREFUSED)
+```
+que aparece no browser disfarçado de "500 Internal Server Error". Usar o IP `127.0.0.1` explicitamente evita a ambiguidade de resolução de DNS. Se mudares este valor, **reinicia o `npm start`** — o CRA só lê o `proxy` do `package.json` no arranque do dev server, não em quente.
+
+---
+
+## 3. Firmware ESP32 (`esp32-firmware/rtls_node.ino`)
+
+### Pré-requisitos (Arduino IDE)
+1. Instala o suporte para placas ESP32 (`Ficheiro > Preferências > URLs adicionais de gestor de placas`, adiciona o índice do `esp32` da Espressif, depois `Ferramentas > Placa > Gestor de Placas` e instala "esp32").
+2. Biblioteca **ArduinoJson** (by Benoit Blanchon), **v6.x** — instala via `Ferramentas > Gerir Bibliotecas`. `BLEDevice`/`BLEScan`/`BLEAdvertisedDevice` já vêm incluídas no core do ESP32.
+3. Placa: **ESP32 Dev Module** (ou equivalente).
+4. **Esquema de partição**: `Ferramentas > Partition Scheme > "No OTA (2MB APP/2MB SPIFFS)"` ou **"Huge APP (3MB No OTA/1MB SPIFFS)"**. O sketch (WiFi + BLE + HTTPClient + ArduinoJson) pode não caber no esquema de partição default em algumas placas — se o compilador der erro de "sketch too big"/espaço insuficiente, muda para um destes esquemas.
+
+### Variáveis a editar antes de carregar
+O ficheiro em `esp32-firmware/rtls_node.ino` traz **placeholders genéricos** de propósito (não credenciais reais, para poder ficar no repositório). Antes de carregar para o ESP32, edita localmente estas 3 variáveis no topo do ficheiro — **não commites os valores reais de volta**:
+```cpp
+const char* WIFI_SSID     = "TUA_REDE_WIFI";              // <- muda para a tua rede WiFi
+const char* WIFI_PASSWORD = "TUA_PASSWORD";               // <- muda para a password dessa rede
+const char* SERVER_URL    = "http://IP_DO_SERVIDOR:5000/api/bledata";  // <- muda para o IP real do portátil, nunca "localhost"
+const char* ESP_ID        = "ESP-101";  // tem de coincidir com o mapeamento em /api/esp-mapping
+```
+Descobre o IP do portátil com `ipconfig` (adaptador Wi-Fi, endereço IPv4) — **muda sempre que a rede mudar** (DHCP pode atribuir um IP diferente).
+
+### Antes de ligar
+- Regista o(s) MAC(s) dos beacons na whitelist (`POST /api/whitelist` ou dashboard) — só MACs whitelisted ficam guardados em `beacon_history`/`beacon_latest`/`raw_detections`.
+- Regista o mapeamento `esp_id → sala` (`POST /api/esp-mapping` ou dashboard), senão a sala fica `"unknown"`.
+- Serial Monitor a **115200 baud** (tem de bater certo com `Serial.begin(115200)` no código, senão aparecem caracteres ilegíveis).
+- Portátil e ESP32 na mesma rede WiFi; a firewall do Windows tem de permitir ligações de entrada na porta 5000 vindas da rede local (perfil de rede "Privado" ajuda; em "Público" o Firewall bloqueia por defeito).
+
+---
+
+## 4. Scripts de teste e análise (`backend/`)
+
+### `mock_mirth.py` — substituto local do Mirth Connect
+Serve para testar sem aceder à rede real do hospital. Escuta HTTP numa porta à escolha, imprime qualquer JSON recebido, responde 200.
+```powershell
+python mock_mirth.py --port 6670
+```
+Usa com `$env:MIRTH_URL = "http://127.0.0.1:6670"` antes de arrancar o `app.py`.
+
+### `simulate_hysteresis.py` — gerador de tráfego de teste
+Simula um beacon a mover-se entre duas salas, com 3 cenários (mudança clara aceite, oscilação rejeitada, mudança forte finalmente aceite), enviando diretamente para `/api/bledata`. Whitelista o MAC e mapeia as salas automaticamente.
+```powershell
+python simulate_hysteresis.py --base-url http://localhost:5000 --delay 1.0
+```
+No fim, imprime um resumo de quantas leituras foram aceites/rejeitadas — compara com o que aparece na consola do backend (linhas "Histerese rejeitou...").
+
+### `analyze_room_decisions.py` — comparação offline dos métodos de decisão
+Lê `raw_detections` da MongoDB e aplica 4 configurações em cadeia (baseline → mediana → mediana+histerese → mediana+histerese+persistência), gerando:
+- `analysis_output/raw_with_decisions_<experiment_id>.csv` — uma linha por deteção, com a decisão de cada método.
+- `analysis_output/decision_summary_<experiment_id>.csv` — métricas por MAC/método (nº de transições, concordância com o método final).
+- `plots/<mac>_<experiment_id>_room_timeline.png` — gráfico com o RSSI bruto e a decisão de cada método ao longo do tempo.
+
+```powershell
+pip install -r requirements-analysis.txt   # se ainda não tiveres feito
+python analyze_room_decisions.py --experiment-id <id> --mac aa:bb:cc:dd:ee:01
+python analyze_room_decisions.py                       # todos os ensaios, todos os MACs
+```
+Principais opções: `--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--no-plots`, `--mongo-uri`.
+
+Usa `POST /api/experiment {"experiment_id": "..."}` antes de um ensaio real para conseguires filtrar os dados desse ensaio especificamente.
+
+---
+
+## 5. Problemas comuns e soluções
+
+**"não é possível carregar... porque a execução de scripts foi desativada neste sistema" (PowerShell, ao correr `npm`/`npx`)**
+Política de execução do PowerShell bloqueia scripts `.ps1` por default. Corrige com (PowerShell como utilizador normal chega):
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+Alternativa: usa o `cmd.exe` ou o Git Bash para correr `npm`/`npx`.
+
+**Vejo dois processos `python.exe` a correr `app.py` — é normal?**
+Depende. Se um é **pai** do outro (`Get-CimInstance Win32_Process | Select ProcessId,ParentProcessId,CommandLine` no PowerShell mostra a relação), é normal — em Python 3.13+/Windows, `venv\Scripts\python.exe` é um pequeno *launcher stub* que arranca o interpretador real como processo filho. Se forem **dois processos independentes** (sem relação pai-filho, de invocações separadas — ex: esqueceste-te de fechar um terminal antigo antes de abrir outro), só um está realmente a ocupar a porta 5000 (confirma com `Get-NetTCPConnection -LocalPort 5000`), e o outro é um duplicado a mais que deves fechar — normalmente é a causa de "o dashboard não atualiza mesmo o backend a responder" (estás a testar/ver um processo, mas o outro é que está ligado à porta).
+
+**Erro `options.allowedHosts[0] should be a non-empty string"` ao correr `npm start`**
+Ver secção 2 acima — normalmente resolve-se com `DANGEROUSLY_DISABLE_HOST_CHECK=true` (só se o fix do proxy `127.0.0.1` não for suficiente) num ficheiro `.env.development.local` dentro de `frontend/` (fica fora do git). Reinicia o `npm start` depois de qualquer alteração a variáveis de ambiente ou ao `proxy`.
+
+**500 Internal Server Error em `/api/login` ou `/api/signup`, sem traceback na consola**
+Confirma primeiro que só tens **um** processo do backend a correr (ver acima) — é a causa mais comum de "a consola que estou a ver não é a que está a responder". Depois testa o endpoint diretamente com `curl` para veres o traceback completo.
+
+**Mirth Connect inacessível (timeout ao mudar de sala)**
+Usa o `mock_mirth.py` + `MIRTH_URL` (secção 4) para testar sem depender da rede do hospital.
+
+**ESP32 não regista deteções novas / valores presos no dashboard**
+Confirma com dois `curl` seguidos a `/api/all-beacons` se o `time` de cada beacon está mesmo a mudar — se estiver idêntico, o problema é o ESP32 não estar a enviar (`POST /api/bledata`), não o frontend. Verifica o Serial Monitor do ESP32.
