@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
-import { FaTachometerAlt, FaListAlt, FaShieldAlt, FaSignal } from "react-icons/fa";
+import { FaTachometerAlt, FaListAlt, FaShieldAlt, FaSignal, FaMapMarkerAlt } from "react-icons/fa";
 
 const sidebarStyle = {
   width: "230px",
@@ -122,7 +122,18 @@ export default function Sidebar() {
           }}
         >
           <FaSignal size={20} />
-          Mirth 
+          Mirth
+        </Link>
+
+        <Link
+          to="/ground-truth"
+          style={{
+            ...linkStyle,
+            ...(location.pathname === "/ground-truth" ? activeStyle : {}),
+          }}
+        >
+          <FaMapMarkerAlt size={20} />
+          Ground Truth
         </Link>
       </nav>
     </aside>

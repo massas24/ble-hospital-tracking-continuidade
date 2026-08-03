@@ -1,18 +1,13 @@
 """
-Minimal local mock of the Mirth HTTP listener, for testing when the real
-Mirth server (192.168.1.117:6661) isn't reachable (e.g. working from home,
-outside the hospital network).
+Simulação local mínima do listener HTTP do Mirth, para testes quando o servidor Mirth real (192.168.1.117:6661) não está acessível (por exemplo, a trabalhar em casa, fora da rede do hospital).
+Apenas regista qualquer JSON enviado via POST e responde com 200 OK - não replica nenhum comportamento real de um canal Mirth.
+Uso:
 
-Just logs whatever JSON is POSTed to it and replies 200 OK - it does not
-replicate any real Mirth channel behavior.
-
-Usage:
-    python mock_mirth.py [--port 6661]
-
-Point the backend at it during local testing (before starting app.py):
-    # PowerShell
-    $env:MIRTH_URL = "http://localhost:6661"
-    python app.py
+python mock_mirth.py [--port 6661]
+Aponte o backend para o mesmo durante os testes locais (antes de iniciar o app.py):
+# PowerShell
+$env:MIRTH_URL = "http://localhost:6661"
+python app.py
 """
 
 import argparse

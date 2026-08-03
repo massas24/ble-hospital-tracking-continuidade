@@ -1,0 +1,475 @@
+"""
+Comparação offline de quatro configurações de decisão de ambiente progressivamente mais rigorosas
+reproduzidas sobre as deteções BLE em bruto já armazenadas por backend/app.py na
+coleção raw_detections do MongoDB:
+
+1. linha de base - a leitura mais recente ganha, sem filtragem
+2. mediana - RSSI mediano numa janela deslizante
+3. histerese mediana - + margem necessária para mudar de ambiente
+4. persistência de histerese mediana - + N leituras consecutivas para confirmar
+
+Cada uma é uma versão progressivamente mais rigorosa da anterior (ver
+decision_methods.py), e não uma alternativa independente - portanto, em vez de uma
+matriz de concordância de todos os pares, cada estágio é comparado com o estágio final
+(mais filtrado) através de agree_rate_vs_final.
+
+Nenhum valor de referência é aqui utilizado - isto compara as quatro configurações
+entre si (taxa de concordância, número de transições), e não com um
+ambiente conhecido e correto. Esta comparação pode ser adicionada posteriormente, após a definição do valor de referência. verdade
+Os dados existem.
+
+Requer pandas e matplotlib para além dos requisitos básicos do backend:
+
+pip instalar -r requisitos.txt -r requisitos-análise.txt
+
+Uso:
+
+python analyze_room_decisions.py --mac aa:bb:cc:dd:ee:01 --experiment-id test1
+
+python analyze_room_decisions.py # todas as experiências, todos os macs
+
+python analyze_room_decisions.py --no-plots # apenas CSVs, ignorar matplotlib
+"""
+
+import argparse
+import json
+import os
+from datetime import datetime
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from pymongo import MongoClient
+
+import decision_methods as dm
+import metrics
+
+METHOD_COLORS = {
+    "baseline": "#8a4fd6",
+    "median": "#eb6834",
+    "median_hysteresis": "#2a78d6",
+    "median_hysteresis_persistence": "#1baf7a",
+}
+METHODS = [
+    ("baseline", "baseline_room", "baseline_changed"),
+    ("median", "median_room", "median_changed"),
+    ("median_hysteresis", "median_hysteresis_room", "median_hysteresis_changed"),
+    ("median_hysteresis_persistence", "median_hysteresis_persistence_room", "median_hysteresis_persistence_changed"),
+]
+FINAL_METHOD = "median_hysteresis_persistence"
+
+
+def normalize_mac(mac):
+    return mac.replace("-", ":").lower().strip().replace('"', "")
+
+
+def load_detections_by_mac(collection, experiment_id, macs):
+    query = {}
+    if experiment_id is not None:
+        query["experiment_id"] = experiment_id
+
+    if macs:
+        target_macs = macs
+    else:
+        target_macs = collection.distinct("mac", query)
+
+    data_by_mac = {}
+    for mac in target_macs:
+        mac_query = dict(query)
+        mac_query["mac"] = mac
+        # Sort by server time then _id: batch_id is a random uuid4 (not a
+        # chronological key), while Mongo's ObjectId is monotonically
+        # increasing at insertion time, giving a true fine-grained tiebreaker
+        # for detections that share the same (1-second-resolution) "time".
+        docs = list(
+            collection.find(
+                mac_query,
+                {"mac": 1, "esp_id": 1, "room": 1, "rssi": 1, "time": 1,
+                 "batch_id": 1, "experiment_id": 1},
+            ).sort([("time", 1), ("_id", 1)])
+        )
+        data_by_mac[mac] = docs
+    return data_by_mac
+
+
+def load_ground_truth_by_mac(collection, experiment_id, macs):
+    """Mesmo formato de consulta que o load_detections_by_mac, mas contra a
+    coleção ground_truth - eventos "o beacon X entrou na sala Y à hora T" 
+    selecionados manualmente, uma linha por seleção de campo."""
+    query = {}
+    if experiment_id is not None:
+        query["experiment_id"] = experiment_id
+
+    data_by_mac = {}
+    for mac in macs:
+        mac_query = dict(query)
+        mac_query["mac"] = mac
+        events = list(
+            collection.find(
+                mac_query, {"experiment_id": 1, "mac": 1, "room": 1, "time": 1}
+            ).sort([("time", 1), ("_id", 1)])
+        )
+        data_by_mac[mac] = events
+    return data_by_mac
+
+
+def build_ground_truth_intervals(events):
+    """Emparelha eventos consecutivos de referência em intervalos: intervalo_i =
+    [evento_i.tempo, evento_{i+1}.tempo], com o intervalo do último evento deixado
+    em aberto (fim=Nenhum). Agrupa por experiment_id FIRST - essencial, uma vez que
+    dois ensaios diferentes reutilizando o mesmo MAC nunca devem ter os seus eventos
+    emparelhados entre experiências. Retorna {experiment_id: [intervalo, ...]}."""
+    by_experiment = {}
+    for ev in events:
+        by_experiment.setdefault(ev.get("experiment_id"), []).append(ev)
+
+    intervals_by_experiment = {}
+    for experiment_id, evs in by_experiment.items():
+        intervals = []
+        for i, ev in enumerate(evs):
+            end = evs[i + 1]["time"] if i + 1 < len(evs) else None
+            intervals.append({"room": ev["room"], "start": ev["time"], "end": end})
+        intervals_by_experiment[experiment_id] = intervals
+    return intervals_by_experiment
+
+
+def lookup_ground_truth_room(intervals, time_str):
+    """Comparação de strings simples - segura porque "%Y-%m-%d %H:%M:%S" é um
+    formato de largura fixa, preenchido com zeros, que classifica/compara corretamente como strings simples,
+    de forma consistente com a forma como este ficheiro já evita a análise de data e hora
+    noutros lugares. Retorna None se time_str estiver fora de todos os intervalos (por ex.
+    antes da primeira verificação ou se não existir qualquer valor de referência)."""
+    if not time_str:
+        return None
+    for interval in intervals:
+        if interval["start"] <= time_str and (interval["end"] is None or time_str < interval["end"]):
+            return interval["room"]
+    return None
+
+
+def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persistence_streak, gt_intervals_by_experiment):
+    baseline = dm.decide_baseline(docs)
+    median = dm.decide_median(docs, window=median_window)
+    med_hyst = dm.decide_median_hysteresis(docs, window=median_window, margin=hysteresis_margin)
+    med_hyst_pers = dm.decide_median_hysteresis_persistence(
+        docs, window=median_window, margin=hysteresis_margin, streak=persistence_streak
+    )
+
+    def agree(a, b):
+        return a is not None and b is not None and a == b
+
+    rows = []
+    for doc, b, m, mh, mhp in zip(docs, baseline, median, med_hyst, med_hyst_pers):
+        b_room, m_room, mh_room, mhp_room = (
+            b["decided_room"], m["decided_room"], mh["decided_room"], mhp["decided_room"],
+        )
+        # Looked up per-row using THIS row's own experiment_id, not the CLI
+        # filter - in "all experiments" mode a single mac's docs can span
+        # more than one trial.
+        intervals = gt_intervals_by_experiment.get(doc.get("experiment_id"), [])
+        ground_truth_room = lookup_ground_truth_room(intervals, doc.get("time"))
+        rows.append({
+            "time": doc.get("time"),
+            "mac": mac,
+            "esp_id": doc.get("esp_id", ""),
+            "batch_id": doc.get("batch_id", ""),
+            "experiment_id": doc.get("experiment_id"),
+            "raw_room": doc.get("room"),
+            "raw_rssi": doc.get("rssi"),
+            "ground_truth_room": ground_truth_room,
+            "baseline_room": b_room,
+            "baseline_changed": b["changed"],
+            "median_room": m_room,
+            "median_changed": m["changed"],
+            "median_hysteresis_room": mh_room,
+            "median_hysteresis_changed": mh["changed"],
+            "median_hysteresis_rejected": mh["rejected"],
+            "median_hysteresis_persistence_room": mhp_room,
+            "median_hysteresis_persistence_changed": mhp["changed"],
+            "baseline_agrees_with_final": agree(b_room, mhp_room),
+            "median_agrees_with_final": agree(m_room, mhp_room),
+            "median_hysteresis_agrees_with_final": agree(mh_room, mhp_room),
+        })
+
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
+def _records_with_none(df):
+    """df.to_dict("records") followed by a real NaN->None pass. Doing this
+    BEFORE to_dict (e.g. df.where(df.notna(), None)) does not work for a
+    float64-dtype column: pandas silently coerces the replacement None
+    right back into NaN to preserve the column's numeric dtype, so a
+    method's room column that happens to be entirely None over some slice
+    (e.g. a persistence-only warm-up subset) would still surface as float
+    NaN, not Python None, downstream - breaking "is None" checks in
+    metrics.py and unorderable sort comparisons in build_confusion_counts.
+    Converting after to_dict (plain Python dicts, no dtype to preserve) is
+    the reliable way to do this instead."""
+    records = df.to_dict("records")
+    for record in records:
+        for key, value in record.items():
+            if isinstance(value, float) and pd.isna(value):
+                record[key] = None
+    return records
+
+
+def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
+    summary_rows = []
+
+    final_room_col = next(rc for name, rc, _ in METHODS if name == FINAL_METHOD)
+    final_rooms = detail_df[final_room_col]
+
+    for method, room_col, changed_col in METHODS:
+        rooms = detail_df[room_col]
+        changed = detail_df[changed_col]
+        decided_mask = rooms.notna()
+
+        num_decided = int(decided_mask.sum())
+        first_decision_index = int(decided_mask.idxmax()) if num_decided > 0 else None
+
+        # "changed" marks any row whose decision differs from the previous
+        # row's, including the very first decision being "established" out
+        # of None. num_transitions excludes that first establishment, since
+        # it isn't a transition between two known rooms.
+        num_changed_true = int(changed.sum())
+        num_transitions = max(0, num_changed_true - (1 if num_decided > 0 else 0))
+
+        # Agreement is measured against the final (most-filtered) stage in
+        # the chain, not an all-pairs matrix - the four configurations are
+        # progressive refinements of each other, not independent alternatives.
+        both_decided = decided_mask & final_rooms.notna()
+        if method == FINAL_METHOD:
+            agree_rate_vs_final = 1.0 if both_decided.sum() > 0 else None
+        elif both_decided.sum() > 0:
+            agree_rate_vs_final = float((rooms[both_decided] == final_rooms[both_decided]).mean())
+        else:
+            agree_rate_vs_final = None
+
+        # Ground-truth-based metrics (accuracy, false/missed movements,
+        # confirmation latency, % time unknown/transition) - see metrics.py.
+        # Reuses first_decision_index computed above so the "establishing
+        # the first decision isn't a movement" rule can never drift between
+        # num_transitions and the false-movement count.
+        method_rows = detail_df[["time", "experiment_id", "ground_truth_room", room_col, changed_col]]
+        method_rows = method_rows.rename(columns={room_col: "estimated_room", changed_col: "changed"})
+        gt_metrics = metrics.compute_ground_truth_metrics(
+            _records_with_none(method_rows), gt_intervals_by_experiment, first_decision_index
+        )
+
+        summary_rows.append({
+            "mac": mac,
+            "method": method,
+            "num_detections": len(detail_df),
+            "num_decided": num_decided,
+            "num_transitions": num_transitions,
+            "first_decision_index": first_decision_index,
+            "agree_rate_vs_final": agree_rate_vs_final,
+            **gt_metrics,
+        })
+
+    return summary_rows
+
+
+def build_confusion_rows(mac, detail_df):
+    """One row per (mac, method, real_room, estimated_room) with a count,
+    built only from rows with ground-truth coverage. Long/tidy format -
+    easy to pivot into a real matrix per method afterwards in pandas/Excel."""
+    confusion_rows = []
+    gt_covered = detail_df[detail_df["ground_truth_room"].notna()]
+    for method, room_col, _ in METHODS:
+        rows = gt_covered[["ground_truth_room", room_col]].rename(columns={room_col: "estimated_room"})
+        for count_row in metrics.build_confusion_counts(_records_with_none(rows)):
+            confusion_rows.append({"mac": mac, "method": method, **count_row})
+    return confusion_rows
+
+
+def plot_mac(mac, detail_df, output_dir, label):
+    x = list(range(len(detail_df)))
+
+    room_cols = ["raw_room"] + [rc for _, rc, _ in METHODS]
+    all_room_values = pd.concat([detail_df[c] for c in room_cols])
+    rooms_all = sorted(r for r in all_room_values.dropna().unique())
+    room_to_code = {room: i for i, room in enumerate(rooms_all)}
+
+    fig, axes = plt.subplots(1 + len(METHODS), 1, sharex=True, figsize=(12, 11))
+
+    ax = axes[0]
+    y_raw = [room_to_code.get(r, float("nan")) for r in detail_df["raw_room"]]
+    ax.scatter(x, y_raw, s=10, color="#6b7280")
+    ax.set_yticks(list(room_to_code.values()))
+    ax.set_yticklabels(list(room_to_code.keys()))
+    ax.set_ylabel("Raw")
+    ax.set_title(f"{mac} - {label}")
+
+    for ax, (name, room_col, changed_col) in zip(axes[1:], METHODS):
+        y = [room_to_code.get(r, float("nan")) if pd.notna(r) else float("nan")
+             for r in detail_df[room_col]]
+        color = METHOD_COLORS[name]
+        ax.step(x, y, where="post", color=color, linewidth=2)
+
+        change_x = [xi for xi, c in zip(x, detail_df[changed_col]) if c]
+        change_y = [y[xi] for xi in change_x]
+        ax.scatter(change_x, change_y, s=40, color=color, zorder=3)
+
+        ax.set_yticks(list(room_to_code.values()))
+        ax.set_yticklabels(list(room_to_code.keys()))
+        ax.set_ylabel(name)
+
+        if name == FINAL_METHOD:
+            decided = detail_df[room_col].notna()
+            if decided.any():
+                first_idx = int(decided.idxmax())
+                if first_idx > 0:
+                    ax.axvspan(-0.5, first_idx - 0.5, color="lightgray", alpha=0.4)
+
+    axes[-1].set_xlabel("Detection index (chronological order)")
+    fig.tight_layout()
+
+    filename = f"{mac.replace(':', '')}_{label}_room_timeline.png"
+    path = os.path.join(output_dir, filename)
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--experiment-id", default=None, help="Filtrar por experiment_id (default: todos)")
+    parser.add_argument("--mac", nargs="+", default=None, help="Um ou mais MACs (default: todos os presentes nos dados)")
+    parser.add_argument("--hysteresis-margin", type=float, default=dm.HYSTERESIS_MARGIN)
+    parser.add_argument("--median-window", type=int, default=5)
+    parser.add_argument("--persistence-streak", type=int, default=3)
+    parser.add_argument("--min-rssi", type=float, default=None,
+                         help="Ignora leituras com RSSI abaixo deste limiar (default: sem filtro)")
+    parser.add_argument("--output-dir", default="analysis_output")
+    parser.add_argument("--no-plots", action="store_true", help="Gera só os CSVs, sem graficos")
+    parser.add_argument("--mongo-uri", default="mongodb://localhost:27017")
+    args = parser.parse_args()
+
+    macs = [normalize_mac(m) for m in args.mac] if args.mac else None
+    label = args.experiment_id if args.experiment_id else "all"
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    plots_dir = os.path.join(os.path.dirname(__file__) or ".", "plots")
+    if not args.no_plots:
+        os.makedirs(plots_dir, exist_ok=True)
+
+    client = MongoClient(args.mongo_uri)
+    db = client["temp1_db"]
+    raw_detections = db["raw_detections"]
+    ground_truth = db["ground_truth"]
+    experiments = db["experiments"]
+
+    print(f"A carregar raw_detections (experiment_id={args.experiment_id!r}, mac={macs})...")
+    data_by_mac = load_detections_by_mac(raw_detections, args.experiment_id, macs)
+
+    if not data_by_mac:
+        print("Nenhum MAC encontrado para os filtros indicados.")
+        return
+
+    if args.min_rssi is not None:
+        # Drops rows outright (not just their rssi) - filters ALL FOUR
+        # methods' working set, not only the median-based ones. This changes
+        # the effective row count of the detail CSV; it's recorded below in
+        # run_metadata, not silent.
+        data_by_mac = {mac: dm.filter_min_rssi(docs, args.min_rssi) for mac, docs in data_by_mac.items()}
+
+    print(f"A carregar ground_truth (experiment_id={args.experiment_id!r})...")
+    ground_truth_by_mac = load_ground_truth_by_mac(ground_truth, args.experiment_id, list(data_by_mac.keys()))
+
+    all_detail_frames = []
+    all_summary_rows = []
+    all_confusion_rows = []
+    ground_truth_summary = {}
+
+    for mac, docs in data_by_mac.items():
+        if not docs:
+            print(f"  {mac}: 0 deteções, a saltar")
+            continue
+        print(f"  {mac}: {len(docs)} deteções")
+
+        gt_events = ground_truth_by_mac.get(mac, [])
+        gt_intervals_by_experiment = build_ground_truth_intervals(gt_events)
+
+        detail_df = build_detail_dataframe(
+            mac, docs, args.hysteresis_margin, args.median_window, args.persistence_streak,
+            gt_intervals_by_experiment,
+        )
+        all_detail_frames.append(detail_df)
+        all_summary_rows.extend(build_summary_rows(mac, detail_df, gt_intervals_by_experiment))
+        all_confusion_rows.extend(build_confusion_rows(mac, detail_df))
+
+        ground_truth_summary[mac] = {
+            "events_loaded": len(gt_events),
+            "rows_with_ground_truth": int(detail_df["ground_truth_room"].notna().sum()),
+            "rows_total": len(detail_df),
+        }
+
+        if not args.no_plots:
+            path = plot_mac(mac, detail_df, plots_dir, label)
+            print(f"    gráfico: {path}")
+
+    if not all_detail_frames:
+        print("Nenhuma deteção para processar.")
+        return
+
+    combined_detail = pd.concat(all_detail_frames, ignore_index=True)
+
+    detail_csv = os.path.join(args.output_dir, f"raw_with_decisions_{label}.csv")
+    summary_csv = os.path.join(args.output_dir, f"decision_summary_{label}.csv")
+    confusion_csv = os.path.join(args.output_dir, f"confusion_matrix_{label}.csv")
+    metadata_json = os.path.join(args.output_dir, f"run_metadata_{label}.json")
+
+    combined_detail.to_csv(detail_csv, index=False)
+    pd.DataFrame(all_summary_rows).to_csv(summary_csv, index=False)
+    # Explicit columns=... even when all_confusion_rows is empty (no ground
+    # truth at all in this run) - otherwise pd.DataFrame([]) has NO columns,
+    # writing a truly headerless CSV instead of a header-only one, which
+    # would break anything downstream expecting these column names to exist.
+    pd.DataFrame(
+        all_confusion_rows, columns=["mac", "method", "real_room", "estimated_room", "count"]
+    ).to_csv(confusion_csv, index=False)
+
+    # Acquisition parameters (scan duration/interval, firmware RSSI cutoff)
+    # were registered separately per experiment_id via POST /api/experiment,
+    # at collection time - keyed here by every experiment_id actually present
+    # in the processed data (not just args.experiment_id, since "all
+    # experiments" mode can mix several trials).
+    distinct_experiment_ids = sorted(
+        e for e in combined_detail["experiment_id"].dropna().unique()
+    )
+    acquisition_by_experiment = {
+        exp_id: experiments.find_one({"experiment_id": exp_id}, {"_id": 0})
+        for exp_id in distinct_experiment_ids
+    }
+
+    run_metadata = {
+        "run_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "experiment_id_filter": args.experiment_id,
+        "mac_filter": macs,
+        "resolved_macs": sorted(data_by_mac.keys()),
+        "analysis_parameters": {
+            "hysteresis_margin": args.hysteresis_margin,
+            "median_window": args.median_window,
+            "persistence_streak": args.persistence_streak,
+            "min_rssi": args.min_rssi,
+        },
+        "output_files": {
+            "detail_csv": detail_csv,
+            "summary_csv": summary_csv,
+            "confusion_csv": confusion_csv,
+            "plots_dir": None if args.no_plots else plots_dir,
+        },
+        "acquisition_parameters_by_experiment": acquisition_by_experiment,
+        "ground_truth_summary": ground_truth_summary,
+    }
+    with open(metadata_json, "w", encoding="utf-8") as f:
+        json.dump(run_metadata, f, indent=2, ensure_ascii=False, default=str)
+
+    print(f"\nCSV de detalhe: {detail_csv}")
+    print(f"CSV de resumo: {summary_csv}")
+    print(f"Matriz de confusão: {confusion_csv}")
+    print(f"Metadados do ensaio/análise: {metadata_json}")
+
+
+if __name__ == "__main__":
+    main()

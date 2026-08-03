@@ -23,12 +23,12 @@
 #include <BLEAdvertisedDevice.h>
 
 // ---------- CONFIGURAÇÃO (edita estes valores) ----------
-const char* WIFI_SSID     = "TUA_REDE_WIFI";
-const char* WIFI_PASSWORD = "TUA_PASSWORD";
+const char* WIFI_SSID     = "MEO-26F280";
+const char* WIFI_PASSWORD = "31ddfdcbe3";
 
 // IP do portátil onde o Flask corre, na mesma rede WiFi do ESP32, porta 5000.
 // Descobre com "ipconfig" no PowerShell (adaptador Wi-Fi, endereço IPv4).
-const char* SERVER_URL    = "http://IP_DO_SERVIDOR:5000/api/bledata";
+const char* SERVER_URL    = "http://192.168.1.90:5000/api/bledata";
 
 // Identificador único deste nó - tem de coincidir, carácter a carácter, com
 // o esp_id que registares no mapeamento de salas (dashboard ou

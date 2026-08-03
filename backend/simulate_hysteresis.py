@@ -1,20 +1,22 @@
 """
-Simulate a single beacon moving between two rooms to exercise the
-hysteresis logic in POST /api/bledata.
+Simular um único beacon movendo-se entre duas salas para exercitar a
+lógica de histerese em POST /api/bledata.
 
-Requires the backend (Flask + MongoDB) to already be running separately:
-    cd backend && python app.py
+Requer que o backend (Flask + MongoDB) já esteja a ser executado em separado:
 
-Usage:
-    python simulate_hysteresis.py [--base-url http://localhost:5000] [--delay 1.0]
+cd backend && python app.py
 
-Note: /api/bledata never tells the caller whether hysteresis accepted or
-rejected a given reading - that decision only shows up as a "Histerese
-rejeitou..." print on the backend's own console. So this script keeps a
-local mirror of the exact same rule (HYSTERESIS_MARGIN) purely to print an
-expected accept/reject summary. Watch the backend console while this runs
-and check its rejection lines match the "rejected" steps printed here - that
-comparison is the actual validation, this script's summary is just a guide.
+Uso:
+
+python simulate_hysteresis.py [--base-url http://localhost:5000] [--delay 1.0]
+
+Nota: /api/bledata nunca informa o chamador se a histerese aceitou ou
+rejeitou uma determinada leitura - esta decisão apenas aparece como uma mensagem "Histerese
+rejeitou..." impresso na própria consola do backend. Portanto, este script mantém um
+espelho local da mesma regra (HYSTERESIS_MARGIN) apenas para imprimir um
+resumo esperado de aceitação/rejeição. Observe a consola do backend enquanto este script é executado
+e verifique se as linhas de rejeição correspondem aos passos "rejeitados" aqui impressos - esta
+comparação é a validação real, o resumo deste script é apenas um guia.
 """
 
 import argparse
@@ -55,8 +57,8 @@ def send_reading(base_url, esp_id, rssi):
 
 
 def expected_outcome(state, room, rssi):
-    """Mirrors backend/app.py's hysteresis rule, used only to build the
-    printed summary (the API response doesn't expose accept/reject)."""
+    """Rede espelhada a regra de histerese backend/app.py, utilizada apenas para construir o
+    resumo impresso (a resposta da API não expõe aceitar/rejeitar)."""
     current = state.get("current")
     if current is None:
         state["current"] = {"room": room, "rssi": rssi}

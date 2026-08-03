@@ -149,6 +149,7 @@ export default function BeaconManagement() {
               <th>Room</th>
               <th>RSSI</th>
               <th>Last Seen</th>
+              <th>Location Status</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -162,6 +163,7 @@ export default function BeaconManagement() {
                   <td>{b.room}</td>
                   <td>{b.rssi}</td>
                   <td>{b.time}</td>
+                  <td>{b.location_status || '-'}</td>
                   <td>{isSent ? '✓ Sent' : 'Pending'}</td>
                 </tr>
               );

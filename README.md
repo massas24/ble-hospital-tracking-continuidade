@@ -35,11 +35,20 @@ pip install -r requirements-analysis.txt
 | Variável | Default | Para quê |
 |---|---|---|
 | `MIRTH_URL` | `http://192.168.1.117:6661` | Endpoint do Mirth Connect para onde os eventos de mudança de sala são enviados. Muda para o `mock_mirth.py` local durante testes (ver secção 4). |
+| `HYSTERESIS_MARGIN` | `5` | Margem (dBm) que uma sala nova tem de superar sobre a sala atual para a mudança ser aceite pela histerese ao vivo (a que gera os eventos de Mirth). |
+| `MEDIAN_WINDOW` | `5` | Nº de deteções recentes usadas na mediana de RSSI, para o cálculo do `location_status` ao vivo. Mesmo default do `--median-window` do `analyze_room_decisions.py`, para as duas visões (ao vivo/offline) refletirem a mesma configuração. |
+| `PERSISTENCE_STREAK` | `3` | Nº de leituras seguidas iguais necessárias para a persistência confirmar uma sala, no cálculo do `location_status` ao vivo. Mesmo default do `--persistence-streak` offline. |
+| `LOCATION_STATUS_HISTORY_SIZE` | `30` | Quantas `raw_detections` recentes por MAC são usadas para recalcular a cadeia mediana+histerese+persistência a cada deteção nova (ver `location_status` mais abaixo). |
+| `INACTIVE_TIMEOUT_SEC` | `60` | Segundos sem deteção até um beacon whitelisted passar a `location_status: "desconhecida"`. Calculado em tempo de leitura (`/api/beacon-latest`, `/api/all-beacons`), não gravado. |
+| `MIN_RSSI` | *(vazio = desativado)* | Limiar mínimo de RSSI (dBm) — leituras mais fracas são ignoradas pela camada de decisão do `location_status` (não pela histerese ao vivo nem pelo `raw_detections`, que ficam sempre completos). Desativado por default; ver nota metodológica abaixo. |
 
 ```powershell
 $env:MIRTH_URL = "http://127.0.0.1:6670"   # exemplo, para testar com o mock local
 python app.py
 ```
+
+#### Nota metodológica: filtragem de RSSI (diferença face ao protótipo original)
+O firmware original da Bella Gnan tinha um **cutoff de -60 dBm aplicado no próprio ESP32** — deteções mais fracas eram descartadas antes de sequer serem enviadas ao backend (ver `docs/Final-MCM-FinalReport-BellaGnan.md`, secção 3.4.1). O firmware atual (`esp32-firmware/rtls_node.ino`) **não tem esse filtro** — envia todas as deteções, sem exceção. Em vez disso, a filtragem por RSSI mínimo (`MIN_RSSI`) foi movida para a **camada de decisão no backend**, propositadamente: assim o `raw_detections` fica sempre completo (importante para a avaliação experimental — ponto 2 do guião), e a filtragem é só aplicada quando e se quiseres, no cálculo de `location_status`, sem perder o dado bruto. Para replicar o comportamento original da Bella, define `MIN_RSSI=-60`.
 
 O servidor fica à escuta em `http://0.0.0.0:5000` (todas as interfaces de rede).
 
@@ -48,6 +57,22 @@ O servidor fica à escuta em `http://0.0.0.0:5000` (todas as interfaces de rede)
 curl http://localhost:5000/api/data -H "X-User: teste"
 ```
 Deve devolver `[]` (lista vazia) ou os dispositivos atualmente detetados, sem erro.
+
+### Ground truth e parâmetros do ensaio
+Para a avaliação experimental (guião, pontos 2 e 8), há dois tipos de registo novos, além do `experiment_id` já existente:
+
+**Parâmetros de aquisição** — fixos durante a recolha (duração/intervalo de scan, filtragem no firmware), associados ao `experiment_id`. Regista-os ao mesmo tempo que marcas o ensaio:
+```powershell
+curl -X POST http://localhost:5000/api/experiment -H "X-User: teste" -H "Content-Type: application/json" -d '{"experiment_id":"ensaio1","scan_duration_sec":5,"upload_interval_ms":10000,"firmware_rssi_cutoff":null}'
+```
+Um `POST` posterior que só reafirme o `experiment_id` (sem estes campos) **não apaga** os valores já registados. `GET /api/experiments` lista todos os ensaios registados. Isto fica guardado à parte (coleção `experiments`), nunca dentro do `raw_detections`.
+
+**Ground truth** — onde o beacon esteve *realmente*, ao longo do tempo. Modelado como eventos discretos ("entrei na sala X agora"), não como intervalos diretos:
+- `POST /api/ground-truth` `{mac, room, experiment_id?, time?, note?}` — `experiment_id` usa por default o ensaio ativo no momento; `time` é opcional (`"YYYY-MM-DD HH:MM:SS"`) para entrada retroativa, senão usa a hora do servidor.
+- `GET /api/ground-truth?experiment_id=&mac=` — lista para revisão.
+- `DELETE /api/ground-truth/<id>` — desfaz uma marcação errada.
+
+Ver secção 2 para a página do dashboard que faz isto na prática (`/ground-truth`). Os intervalos de ground truth (`"esteve em X entre T1 e T2"`) são derivados só na análise offline (secção 4), emparelhando eventos consecutivos do mesmo ensaio — não ficam guardados como intervalos na BD.
 
 ---
 
@@ -79,6 +104,18 @@ Proxy error: Could not proxy request /api/... from localhost:3000 to http://loca
 ```
 que aparece no browser disfarçado de "500 Internal Server Error". Usar o IP `127.0.0.1` explicitamente evita a ambiguidade de resolução de DNS. Se mudares este valor, **reinicia o `npm start`** — o CRA só lê o `proxy` do `package.json` no arranque do dev server, não em quente.
 
+### Página `/ground-truth` — marcar a localização real durante um ensaio
+Página pensada para usar no **telemóvel**, a andar fisicamente com o beacon, longe do portátil. Acessível pela ligação "Ground Truth" na sidebar, ou diretamente pelo URL `http://<IP-do-portátil>:3000/ground-truth` — vale a pena **adicionar aos favoritos/ecrã principal do telemóvel** para acesso rápido a meio de um ensaio. Fica fora do layout de desktop (sem sidebar fixa), só precisa de autenticação normal (mesmo login que já usas — o telemóvel também guarda a sessão em `localStorage` depois de entrares uma vez).
+
+Como usar:
+1. Mostra o `experiment_id` ativo em destaque (aviso vermelho se não houver nenhum).
+2. Escolhe o beacon (MAC) num `<select>` — fica guardado no telemóvel para a próxima vez.
+3. Toca no botão grande da sala onde estás **agora** — cada toque envia logo um evento com a hora do servidor.
+4. **"Hora manual"**: alternador que revela um campo de data/hora, para entrada retroativa (ex: sem rede no momento — anotas mentalmente as horas e introduzes tudo depois, já com rede).
+5. Lista das últimas marcações desta sessão, cada uma com um botão **"Desfazer"** — para os toques errados, que vão acontecer.
+
+Os eventos ficam guardados como pontos no tempo (não intervalos) — os intervalos ("esteve na sala X entre T1 e T2") só são calculados depois, no `analyze_room_decisions.py`.
+
 ---
 
 ## 3. Firmware ESP32 (`esp32-firmware/rtls_node.ino`)
@@ -98,6 +135,9 @@ const char* SERVER_URL    = "http://IP_DO_SERVIDOR:5000/api/bledata";  // <- mud
 const char* ESP_ID        = "ESP-101";  // tem de coincidir com o mapeamento em /api/esp-mapping
 ```
 Descobre o IP do portátil com `ipconfig` (adaptador Wi-Fi, endereço IPv4) — **muda sempre que a rede mudar** (DHCP pode atribuir um IP diferente).
+
+### Limitação conhecida: configuração do scan não é remota
+`SCAN_DURATION_SEC` e `UPLOAD_INTERVAL_MS` continuam fixos como `const` no `.ino` — só se mudam recompilando e recarregando o firmware em cada ESP32. O guião (secção 7) pede que isto seja configurável sem recompilar; para isso seria preciso o ESP32 ir buscar a sua configuração ao backend no arranque (ex: um endpoint novo tipo `/api/node-config`), o que ainda não foi implementado. Fica registado como trabalho futuro, não como algo já resolvido.
 
 ### Antes de ligar
 - Regista o(s) MAC(s) dos beacons na whitelist (`POST /api/whitelist` ou dashboard) — só MACs whitelisted ficam guardados em `beacon_history`/`beacon_latest`/`raw_detections`.
@@ -125,16 +165,18 @@ No fim, imprime um resumo de quantas leituras foram aceites/rejeitadas — compa
 
 ### `analyze_room_decisions.py` — comparação offline dos métodos de decisão
 Lê `raw_detections` da MongoDB e aplica 4 configurações em cadeia (baseline → mediana → mediana+histerese → mediana+histerese+persistência), gerando:
-- `analysis_output/raw_with_decisions_<experiment_id>.csv` — uma linha por deteção, com a decisão de cada método.
+- `analysis_output/raw_with_decisions_<experiment_id>.csv` — uma linha por deteção, com a decisão de cada método **e a coluna `ground_truth_room`** (sala real, derivada dos eventos marcados em `/ground-truth` — em branco antes da 1ª marcação de um ensaio).
 - `analysis_output/decision_summary_<experiment_id>.csv` — métricas por MAC/método (nº de transições, concordância com o método final).
+- `analysis_output/run_metadata_<experiment_id>.json` — metadados desta execução específica: os parâmetros de **análise** usados (`--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--min-rssi`), os parâmetros de **aquisição** de cada `experiment_id` presente nos dados (lidos da coleção `experiments`), e um resumo de quantos eventos de ground truth foram carregados por MAC. É este ficheiro que te permite reanalisar o mesmo ensaio com parâmetros diferentes sem repetir a recolha — cada execução sobrescreve o seu próprio `run_metadata_<label>.json`, nunca os dados brutos.
 - `plots/<mac>_<experiment_id>_room_timeline.png` — gráfico com o RSSI bruto e a decisão de cada método ao longo do tempo.
 
 ```powershell
 pip install -r requirements-analysis.txt   # se ainda não tiveres feito
 python analyze_room_decisions.py --experiment-id <id> --mac aa:bb:cc:dd:ee:01
 python analyze_room_decisions.py                       # todos os ensaios, todos os MACs
+python analyze_room_decisions.py --experiment-id <id> --min-rssi -70   # ignora leituras mais fracas que -70 dBm
 ```
-Principais opções: `--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--no-plots`, `--mongo-uri`.
+Principais opções: `--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--min-rssi` (default: sem filtro — ver nota metodológica acima sobre o cutoff de -60 dBm da Bella), `--no-plots`, `--mongo-uri`.
 
 Usa `POST /api/experiment {"experiment_id": "..."}` antes de um ensaio real para conseguires filtrar os dados desse ensaio especificamente.
 
