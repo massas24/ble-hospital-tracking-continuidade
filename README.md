@@ -42,6 +42,15 @@ pip install -r requirements-analysis.txt
 | `INACTIVE_TIMEOUT_SEC` | `60` | Segundos sem deteção até um beacon whitelisted passar a `location_status: "desconhecida"`. Calculado em tempo de leitura (`/api/beacon-latest`, `/api/all-beacons`), não gravado. |
 | `MIN_RSSI` | *(vazio = desativado)* | Limiar mínimo de RSSI (dBm) — leituras mais fracas são ignoradas pela camada de decisão do `location_status` (não pela histerese ao vivo nem pelo `raw_detections`, que ficam sempre completos). Desativado por default; ver nota metodológica abaixo. |
 
+**Forma prática de definir isto sem repetir a cada terminal novo**: copia `backend/.env.example` para `backend/.env` e edita os valores que quiseres mudar — o `app.py` carrega-o automaticamente no arranque (`python-dotenv`). O `.env` real fica fora do git (`.gitignore`), cada máquina/pessoa tem o seu; sem esse ficheiro, tudo continua exatamente como na tabela acima.
+```powershell
+cd backend
+cp .env.example .env
+notepad .env   # edita o que precisares, ex: MIRTH_URL
+python app.py
+```
+
+Alternativa pontual (sem `.env`, só para essa sessão do terminal):
 ```powershell
 $env:MIRTH_URL = "http://127.0.0.1:6670"   # exemplo, para testar com o mock local
 python app.py

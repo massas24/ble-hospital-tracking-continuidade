@@ -31,6 +31,15 @@ import decision_methods
 # specific document by id, e.g. to undo a mistaken field tap)
 from bson import ObjectId
 from bson.errors import InvalidId
+# Loads backend/.env into os.environ, if that file exists, so the env vars
+# below don't have to be set manually in every new terminal
+from dotenv import load_dotenv
+
+# Explicit path (not just load_dotenv()'s default cwd-search) so this works
+# the same regardless of which directory app.py is launched from. Silently
+# does nothing if backend/.env doesn't exist - every os.environ.get(...)
+# below then falls back to its existing default, unchanged from today.
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 #------------------------------------------------------------------------------
 # Initialize Flask app and enable CORS
 app = Flask(__name__)  # Create Flask application instance
