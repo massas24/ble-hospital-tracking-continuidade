@@ -508,15 +508,75 @@ def get_all_beacons():
 #==============================================================================
 # SECTION 8: BLE DATA INGESTION
 #==============================================================================
+# Per-esp_id sequence tracking for missing/duplicate batch detection (guião
+# secção 3) - only in memory, same lifetime as beacon_locations (resets on
+# backend restart). Keyed by esp_id; each value tracks the boot_id of the
+# node's current session, since node_seq restarts at 1 on every firmware
+# boot and would otherwise look like duplicates/gaps across a restart.
+NODE_SEQ_STATE = {}  # {esp_id: {"boot_id": ..., "last_seq": ...}}
+
+
+def _parse_bledata_payload(payload):
+    """Accepts the legacy shape (a bare list of device dicts, no batch-level
+    metadata) and the new batch shape (an object with esp_id/node_seq/
+    boot_id/node_time plus a "readings" list). Returns (devices, node_seq,
+    node_time, batch_esp_id, boot_id); the new fields are None when absent
+    (legacy format, or NTP unsynced at send time for node_time specifically -
+    boot_id/node_seq are always sent unconditionally by the new firmware,
+    but are defensively coerced to None if missing or the wrong type)."""
+    if isinstance(payload, list):
+        return payload, None, None, None, None
+    if isinstance(payload, dict) and isinstance(payload.get("readings"), list):
+        batch_esp_id = payload.get("esp_id") or ""
+        devices = [dict(r, esp_id=r.get("esp_id") or batch_esp_id) for r in payload["readings"]]
+        node_seq = payload.get("node_seq")
+        if not isinstance(node_seq, int):
+            node_seq = None
+        boot_id = payload.get("boot_id")
+        if not isinstance(boot_id, int):
+            boot_id = None
+        return devices, node_seq, payload.get("node_time"), batch_esp_id, boot_id
+    return None, None, None, None, None
+
+
+def _check_node_seq(esp_id, node_seq, boot_id):
+    """Detects missing/duplicate batches per node (guião secção 3) - only
+    prints (same convention as the hysteresis-rejection log below), never
+    blocks ingestion or persists to Mongo. boot_id identifies a continuous
+    running session of the node (node_seq restarts at 0 on every firmware
+    boot) - a boot_id change is never compared as a gap/duplicate, it just
+    resets tracking for the new session. Without boot_id (legacy format, or
+    a missing field) there is no safe way to tell sessions apart, so the
+    check is skipped entirely in that case."""
+    if not esp_id or node_seq is None or boot_id is None:
+        return
+    state = NODE_SEQ_STATE.get(esp_id)
+    if state is None or state.get("boot_id") != boot_id:
+        if state is not None:
+            print(f"Info: {esp_id} reiniciou (novo boot_id) - a reiniciar rastreio de node_seq")
+        NODE_SEQ_STATE[esp_id] = {"boot_id": boot_id, "last_seq": node_seq}
+        return
+    last_seq = state["last_seq"]
+    if node_seq == last_seq:
+        print(f"Aviso: lote duplicado de {esp_id} (node_seq={node_seq} repetido)")
+    elif node_seq > last_seq + 1:
+        print(f"Aviso: {node_seq - last_seq - 1} lote(s) em falta de {esp_id} "
+              f"(esperado {last_seq + 1}, recebido {node_seq})")
+    elif node_seq < last_seq:
+        print(f"Aviso: node_seq de {esp_id} recuou dentro da mesma sessão "
+              f"(esperado >={last_seq + 1}, recebido {node_seq}) - inesperado")
+    state["last_seq"] = node_seq
+
+
 # Endpoint that receives a batch of BLE scans from ESP devices
 @app.route("/api/bledata", methods=["POST"])
 def bledata():
     # Declare globals used for storing ephemeral state
     global live_devices, beacon_locations, manually_sent_beacons
 
-    devices = request.get_json()  # Expect a JSON array of device dicts
-    # Validate payload type
-    if not isinstance(devices, list):
+    payload = request.get_json()
+    devices, node_seq, node_time, batch_esp_id, boot_id = _parse_bledata_payload(payload)
+    if devices is None:
         return jsonify({"error": "Invalid data format"}), 400
 
     # Timestamp for all incoming devices
@@ -528,6 +588,10 @@ def bledata():
     # Use a persistent attribute on the function to keep a dict between calls
     if not hasattr(bledata, "live_devices_dict"):
         bledata.live_devices_dict = {}
+
+    # Runs once per POST, before/independent of the per-device loop below -
+    # so a valid batch with 0 readings still counts towards the sequence.
+    _check_node_seq(batch_esp_id, node_seq, boot_id)
 
     # Process each reported device
     for device in devices:
@@ -546,14 +610,18 @@ def bledata():
         # Only persist and notify for whitelisted MACs
         if beacon_whitelist.find_one({"mac": mac}):
             # Append raw, unprocessed detection for offline experimentation
-            # (kept separate from beacon_history/beacon_latest, which already
-            # reflect the hysteresis-based room decision)
+            # (kept separate from beacon_history, which stays raw on the same
+            # convention, and from beacon_latest, which reflects the
+            # hysteresis-filtered room decision - see below)
             raw_detections.insert_one({
                 "mac": mac,
                 "esp_id": device.get("esp_id", ""),
                 "room": device["room"],
                 "rssi": device.get("rssi", ""),
                 "time": now_str,
+                "node_time": node_time,
+                "node_seq": node_seq,
+                "boot_id": boot_id,
                 "batch_id": batch_id,
                 "experiment_id": current_experiment_id,
             })
@@ -591,32 +659,17 @@ def bledata():
                 print(f"Falha ao calcular location_status para {mac}: {str(e)}")
                 location_status = None
 
-            # Append to historical collection
-            beacon_history.insert_one({
-                "esp_id": device.get("esp_id", ""),
-                "esp_name": device.get("esp_name", ""),
-                "room": device["room"],
-                "mac": mac,
-                "rssi": device.get("rssi", ""),
-                "time": now_str,
-            })
-            # Upsert latest state for this MAC
-            beacon_latest.update_one(
-                {"mac": mac},
-                {"$set": {
-                    "esp_id": device.get("esp_id", ""),
-                    "esp_name": device.get("esp_name", ""),
-                    "room": device["room"],
-                    "mac": mac,
-                    "rssi": device.get("rssi", ""),
-                    "time": now_str,
-                    "location_status": location_status,
-                }},
-                upsert=True
-            )
             # Location-change detection with hysteresis: only accept a room
             # change if the new RSSI is at least HYSTERESIS_MARGIN dBm
-            # stronger than the RSSI stored for the current room
+            # stronger than the RSSI stored for the current room. Runs
+            # BEFORE beacon_latest is written below, so beacon_latest can
+            # reflect this filtered/stable state - previously beacon_latest
+            # (and so the dashboard) always showed whichever node most
+            # recently reported, completely unfiltered, which with several
+            # nodes concurrently seeing the same beacon made the dashboard
+            # flicker between rooms every few seconds regardless of the
+            # hysteresis margin (hysteresis only ever gated the Mirth
+            # notification below, never what got displayed).
             new_room = device["room"]
             new_rssi = device.get("rssi")
             current = beacon_locations.get(mac)
@@ -652,11 +705,19 @@ def bledata():
                             headers={'Content-Type': 'application/json'}
                         )
                     except requests.exceptions.RequestException as e:
-                        # Log failure but do not fail the whole ingestion
-                        print(f"✗ Failed to send location change for {mac} to Mirth: {str(e)}")
+                        # Log failure but do not fail the whole ingestion.
+                        # Plain ASCII prefix on purpose - a "✗" here used to
+                        # raise UnicodeEncodeError on Windows consoles (cp1252
+                        # can't encode it), which crashed this exact request
+                        # with a 500 despite this try/except's whole point
+                        # being to swallow Mirth failures without failing.
+                        print(f"Aviso: falha ao enviar mudança de localização de {mac} para o Mirth: {str(e)}")
 
                     # Accepted: update stored room/RSSI to the new reading
-                    beacon_locations[mac] = {"room": new_room, "rssi": new_rssi}
+                    beacon_locations[mac] = {
+                        "room": new_room, "rssi": new_rssi,
+                        "esp_id": device.get("esp_id", ""), "esp_name": device.get("esp_name", ""),
+                    }
                 else:
                     # Rejected: not enough signal improvement yet - keep the
                     # previously stored room/RSSI unchanged
@@ -670,8 +731,46 @@ def bledata():
             else:
                 # First sighting since startup, or still in the same room:
                 # (re)confirm the stored room and refresh the RSSI baseline
-                beacon_locations[mac] = {"room": new_room, "rssi": new_rssi}
- 
+                beacon_locations[mac] = {
+                    "room": new_room, "rssi": new_rssi,
+                    "esp_id": device.get("esp_id", ""), "esp_name": device.get("esp_name", ""),
+                }
+
+            # Append to historical collection - raw/unfiltered, same
+            # convention as raw_detections, on purpose (not the hysteresis-
+            # filtered state written to beacon_latest just below).
+            beacon_history.insert_one({
+                "esp_id": device.get("esp_id", ""),
+                "esp_name": device.get("esp_name", ""),
+                "room": device["room"],
+                "mac": mac,
+                "rssi": device.get("rssi", ""),
+                "time": now_str,
+            })
+            # Upsert latest state for this MAC - room/rssi/esp_id/esp_name
+            # now reflect the hysteresis-filtered beacon_locations state
+            # (stable, only changes on an accepted transition), not the raw
+            # per-detection reading just above. "time" stays unconditional
+            # (updates on every detection regardless of hysteresis outcome)
+            # so staleness detection (INACTIVE_TIMEOUT_SEC,
+            # apply_location_status_overrides) keeps working correctly for a
+            # beacon that's still being seen but just hasn't had an accepted
+            # room change recently.
+            stable = beacon_locations[mac]
+            beacon_latest.update_one(
+                {"mac": mac},
+                {"$set": {
+                    "esp_id": stable.get("esp_id", ""),
+                    "esp_name": stable.get("esp_name", ""),
+                    "room": stable["room"],
+                    "mac": mac,
+                    "rssi": stable.get("rssi", ""),
+                    "time": now_str,
+                    "location_status": location_status,
+                }},
+                upsert=True
+            )
+
     # Convert live data dict to a list for the /api/data endpoint
     live_devices = list(bledata.live_devices_dict.values())
     return jsonify({"status": "success", "received": len(devices)})

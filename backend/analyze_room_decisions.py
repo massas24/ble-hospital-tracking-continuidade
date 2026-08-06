@@ -57,6 +57,25 @@ METHODS = [
 ]
 FINAL_METHOD = "median_hysteresis_persistence"
 
+# Shown once in run_metadata whenever at least one (mac, experiment_id)
+# group used clock_source="node" - see _group_uses_node_time's docstring
+# for the full reasoning. Kept as a complete, citable sentence rather than
+# a bare boolean, since this is a real methodological caveat for whatever
+# report cites these numbers, not just an internal implementation note.
+NODE_TIME_CLOCK_WARNING = (
+    "Pelo menos um grupo (mac, experiment_id) nesta corrida usou node_time "
+    "(relógio do próprio nó, sincronizado por NTP) em vez da hora de "
+    "receção do servidor. Isto muda uma propriedade importante: quando "
+    "deteção E ground truth vêm do MESMO relógio (servidor), um desvio "
+    "desse relógio cancela-se na subtração e a latência sai correta mesmo "
+    "que o relógio esteja errado em termos absolutos. Ao misturar node_time "
+    "(nó) com o ground truth (sempre servidor), esse cancelamento deixa de "
+    "acontecer - um desvio do relógio do SERVIDOR entra diretamente, sem se "
+    "cancelar, em todas as latências destes grupos. As latências destes "
+    "grupos só são fiáveis se o relógio do servidor também estiver "
+    "corretamente sincronizado - não verificado por este código. Ver README."
+)
+
 
 def normalize_mac(mac):
     return mac.replace("-", ":").lower().strip().replace('"', "")
@@ -84,6 +103,7 @@ def load_detections_by_mac(collection, experiment_id, macs):
             collection.find(
                 mac_query,
                 {"mac": 1, "esp_id": 1, "room": 1, "rssi": 1, "time": 1,
+                 "node_time": 1, "node_seq": 1, "boot_id": 1,
                  "batch_id": 1, "experiment_id": 1},
             ).sort([("time", 1), ("_id", 1)])
         )
@@ -146,6 +166,38 @@ def lookup_ground_truth_room(intervals, time_str):
     return None
 
 
+def _group_uses_node_time(docs):
+    """True só se TODAS as deteções deste grupo (mac, experiment_id)
+    tiverem node_time E vierem todas do MESMO esp_id - duas condições, não
+    uma. Decisão por CONJUNTO, nunca por linha: se node_time faltar nalguma
+    linha, o grupo inteiro recua para a hora de receção.
+
+    Porquê também exigir um único esp_id (não só node_time em todas as
+    linhas): a ordem de base do detail_df continua sempre por hora de
+    receção (nunca por node_time), e é essa MESMA ordem que alimenta tanto
+    decision_methods.py (changed/decisões) como, a seguir, o metrics.py
+    (transições/latências) - as duas têm de usar a mesma ordem, ou
+    "changed" deixa de corresponder à linha anterior real. Isso só é
+    seguro quando a ordem de receção e a ordem do próprio nó COINCIDEM -
+    garantido para um único esp_id (um dispositivo só gera e envia as
+    suas leituras em sequência), não garantido quando vários nós reportam
+    o mesmo beacon com atrasos de rede diferentes. Alargar a vários nós
+    exigiria também mudar a ordem que alimenta decision_methods.py - fora
+    de âmbito aqui, fica só a acumular node_time/node_seq/boot_id para
+    esse trabalho futuro.
+
+    Nota sobre validade adicional: comparar o relógio do nó com o do
+    ground_truth (sempre o relógio do servidor) só é correto se o próprio
+    relógio do SERVIDOR também estiver certo - não verificado nem
+    garantido por este código (ver limitação no README, e
+    NODE_TIME_CLOCK_WARNING em run_metadata)."""
+    if not docs:
+        return False
+    if not all(d.get("node_time") is not None for d in docs):
+        return False
+    return len({d.get("esp_id") for d in docs}) == 1
+
+
 def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persistence_streak, gt_intervals_by_experiment):
     baseline = dm.decide_baseline(docs)
     median = dm.decide_median(docs, window=median_window)
@@ -157,22 +209,39 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persiste
     def agree(a, b):
         return a is not None and b is not None and a == b
 
+    # Escolha do relógio por CONJUNTO (mac, experiment_id), pré-calculada
+    # antes do ciclo principal - ver _group_uses_node_time.
+    docs_by_experiment = {}
+    for doc in docs:
+        docs_by_experiment.setdefault(doc.get("experiment_id"), []).append(doc)
+    uses_node_time_by_experiment = {
+        exp_id: _group_uses_node_time(exp_docs) for exp_id, exp_docs in docs_by_experiment.items()
+    }
+
     rows = []
     for doc, b, m, mh, mhp in zip(docs, baseline, median, med_hyst, med_hyst_pers):
         b_room, m_room, mh_room, mhp_room = (
             b["decided_room"], m["decided_room"], mh["decided_room"], mhp["decided_room"],
         )
+        experiment_id = doc.get("experiment_id")
+        uses_node_time = uses_node_time_by_experiment.get(experiment_id, False)
+        effective_time = doc.get("node_time") if uses_node_time else doc.get("time")
         # Looked up per-row using THIS row's own experiment_id, not the CLI
         # filter - in "all experiments" mode a single mac's docs can span
         # more than one trial.
-        intervals = gt_intervals_by_experiment.get(doc.get("experiment_id"), [])
-        ground_truth_room = lookup_ground_truth_room(intervals, doc.get("time"))
+        intervals = gt_intervals_by_experiment.get(experiment_id, [])
+        ground_truth_room = lookup_ground_truth_room(intervals, effective_time)
         rows.append({
             "time": doc.get("time"),
+            "node_time": doc.get("node_time"),
+            "node_seq": doc.get("node_seq"),
+            "boot_id": doc.get("boot_id"),
+            "effective_time": effective_time,
+            "clock_source": "node" if uses_node_time else "server",
             "mac": mac,
             "esp_id": doc.get("esp_id", ""),
             "batch_id": doc.get("batch_id", ""),
-            "experiment_id": doc.get("experiment_id"),
+            "experiment_id": experiment_id,
             "raw_room": doc.get("room"),
             "raw_rssi": doc.get("rssi"),
             "ground_truth_room": ground_truth_room,
@@ -249,8 +318,14 @@ def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
         # Reuses first_decision_index computed above so the "establishing
         # the first decision isn't a movement" rule can never drift between
         # num_transitions and the false-movement count.
-        method_rows = detail_df[["time", "experiment_id", "ground_truth_room", room_col, changed_col]]
-        method_rows = method_rows.rename(columns={room_col: "estimated_room", changed_col: "changed"})
+        # Uses effective_time (node clock when the whole group qualifies,
+        # else receipt time - see _group_uses_node_time), renamed back to
+        # "time" for metrics.py. No reordering needed: _group_uses_node_time
+        # already guarantees receipt order and node order coincide whenever
+        # clock_source="node", so this stays in detail_df's own row order,
+        # the same order decision_methods.py already processed.
+        method_rows = detail_df[["effective_time", "experiment_id", "ground_truth_room", room_col, changed_col]]
+        method_rows = method_rows.rename(columns={"effective_time": "time", room_col: "estimated_room", changed_col: "changed"})
         gt_metrics = metrics.compute_ground_truth_metrics(
             _records_with_none(method_rows), gt_intervals_by_experiment, first_decision_index
         )
@@ -280,6 +355,57 @@ def build_confusion_rows(mac, detail_df):
         for count_row in metrics.build_confusion_counts(_records_with_none(rows)):
             confusion_rows.append({"mac": mac, "method": method, **count_row})
     return confusion_rows
+
+
+def load_node_seq_by_esp(collection, experiment_id):
+    """{(esp_id, boot_id): [node_seq, ...]} - uma entrada por LOTE (esp_id,
+    batch_id) distinto, não por linha de raw_detections (várias linhas
+    partilham o mesmo node_seq quando o mesmo lote viu vários beacons).
+    node_seq é propriedade do NÓ, não do beacon - por isso esta função
+    trabalha diretamente sobre a coleção, independente de data_by_mac.
+    Linhas com boot_id em falta (dados antigos, anteriores a esta
+    funcionalidade) ficam de fora - sem boot_id não há forma segura de
+    saber a que sessão pertencem."""
+    query = {"node_seq": {"$ne": None}, "boot_id": {"$ne": None}}
+    if experiment_id is not None:
+        query["experiment_id"] = experiment_id
+    docs = collection.find(query, {"esp_id": 1, "node_seq": 1, "batch_id": 1, "boot_id": 1})
+    seen_batches = set()
+    seqs_by_esp_boot = {}
+    for doc in docs:
+        key = (doc.get("esp_id"), doc.get("batch_id"))
+        if key in seen_batches:
+            continue
+        seen_batches.add(key)
+        seqs_by_esp_boot.setdefault((doc.get("esp_id"), doc.get("boot_id")), []).append(doc.get("node_seq"))
+    return seqs_by_esp_boot
+
+
+def compute_node_seq_gaps(seqs_by_esp_boot):
+    """Ordena por node_seq DENTRO DE CADA (esp_id, boot_id) e conta saltos/
+    duplicados - nunca entre sessões diferentes do mesmo nó (node_seq
+    reinicia a cada arranque do firmware, por isso duas sessões podem
+    partilhar números por coincidência). Devolve
+    {esp_id: [{"boot_id", "num_batches_seen", "num_duplicates", "num_gaps",
+    "num_missing_estimated", "seq_min", "seq_max"}, ...]} - uma entrada por
+    sessão de arranque, agrupadas por esp_id só para leitura mais fácil."""
+    result = {}
+    for (esp_id, boot_id), seqs in seqs_by_esp_boot.items():
+        ordered = sorted(seqs)
+        num_duplicates = num_gaps = num_missing_estimated = 0
+        for i in range(1, len(ordered)):
+            diff = ordered[i] - ordered[i - 1]
+            if diff == 0:
+                num_duplicates += 1
+            elif diff > 1:
+                num_gaps += 1
+                num_missing_estimated += diff - 1
+        result.setdefault(esp_id, []).append({
+            "boot_id": boot_id, "num_batches_seen": len(ordered), "num_duplicates": num_duplicates,
+            "num_gaps": num_gaps, "num_missing_estimated": num_missing_estimated,
+            "seq_min": ordered[0] if ordered else None, "seq_max": ordered[-1] if ordered else None,
+        })
+    return result
 
 
 def plot_mac(mac, detail_df, output_dir, label):
@@ -380,6 +506,7 @@ def main():
     all_summary_rows = []
     all_confusion_rows = []
     ground_truth_summary = {}
+    node_time_summary = {}
 
     for mac, docs in data_by_mac.items():
         if not docs:
@@ -402,6 +529,14 @@ def main():
             "events_loaded": len(gt_events),
             "rows_with_ground_truth": int(detail_df["ground_truth_room"].notna().sum()),
             "rows_total": len(detail_df),
+        }
+        node_time_summary[mac] = {
+            "rows_with_node_seq": int(detail_df["node_seq"].notna().sum()),
+            "rows_with_node_time": int(detail_df["node_time"].notna().sum()),
+            "rows_total": len(detail_df),
+            "experiments_using_node_time": sorted(
+                exp_id for exp_id in detail_df.loc[detail_df["clock_source"] == "node", "experiment_id"].dropna().unique()
+            ),
         }
 
         if not args.no_plots:
@@ -442,6 +577,19 @@ def main():
         for exp_id in distinct_experiment_ids
     }
 
+    # Offline missing/duplicate-batch detection (guião secção 3) - reads
+    # node_seq directly from raw_detections, independent of data_by_mac
+    # (node_seq is a property of the node, not the beacon). Complements the
+    # live, console-only check in app.py with citable numbers here.
+    node_seq_gap_summary = compute_node_seq_gaps(load_node_seq_by_esp(raw_detections, args.experiment_id))
+
+    # See NODE_TIME_CLOCK_WARNING's own comment - this stays None (no
+    # warning at all) unless at least one processed group actually used
+    # clock_source="node".
+    node_time_clock_warning = (
+        NODE_TIME_CLOCK_WARNING if (combined_detail["clock_source"] == "node").any() else None
+    )
+
     run_metadata = {
         "run_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "experiment_id_filter": args.experiment_id,
@@ -461,6 +609,9 @@ def main():
         },
         "acquisition_parameters_by_experiment": acquisition_by_experiment,
         "ground_truth_summary": ground_truth_summary,
+        "node_time_summary": node_time_summary,
+        "node_seq_gap_summary": node_seq_gap_summary,
+        "node_time_clock_warning": node_time_clock_warning,
     }
     with open(metadata_json, "w", encoding="utf-8") as f:
         json.dump(run_metadata, f, indent=2, ensure_ascii=False, default=str)

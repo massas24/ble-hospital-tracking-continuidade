@@ -59,20 +59,34 @@ python app.py
 #### Nota metodológica: filtragem de RSSI (diferença face ao protótipo original)
 O firmware original da Bella Gnan tinha um **cutoff de -60 dBm aplicado no próprio ESP32** — deteções mais fracas eram descartadas antes de sequer serem enviadas ao backend (ver `docs/Final-MCM-FinalReport-BellaGnan.md`, secção 3.4.1). O firmware atual (`esp32-firmware/rtls_node.ino`) **não tem esse filtro** — envia todas as deteções, sem exceção. Em vez disso, a filtragem por RSSI mínimo (`MIN_RSSI`) foi movida para a **camada de decisão no backend**, propositadamente: assim o `raw_detections` fica sempre completo (importante para a avaliação experimental — ponto 2 do guião), e a filtragem é só aplicada quando e se quiseres, no cálculo de `location_status`, sem perder o dado bruto. Para replicar o comportamento original da Bella, define `MIN_RSSI=-60`.
 
+#### Nota metodológica: sincronização temporal (NTP) e identificação de lotes (guião secção 3)
+`raw_detections` guarda, além do `time` já existente (hora de **receção no servidor**, sem alteração de significado, continua a comandar a ordenação em `analyze_room_decisions.py`), três campos novos, opcionais (`None`/ausentes em dados anteriores a esta funcionalidade, ou quando o firmware antigo/o formato antigo é usado):
+- **`node_time`** — instante de fim do scan segundo o relógio do próprio ESP32, sincronizado por NTP no arranque e periodicamente depois. Fica ausente se o NTP não estiver sincronizado no momento do envio.
+- **`node_seq`** — contador local do nó, incrementa a cada tentativa de envio (mesmo que o POST falhe). **Diferente do `batch_id`** já existente: esse é um UUID aleatório gerado pelo *servidor* só para agrupar as linhas de um POST; `node_seq` é do *nó*, e serve para detetar lotes em falta ou duplicados.
+- **`boot_id`** — identifica uma sessão de arranque contínua do nó (gerado aleatoriamente uma vez por arranque). Necessário porque `node_seq` reinicia a cada arranque do firmware — sem `boot_id`, um reinício a meio de um ensaio pareceria gerar duplicados/gaps falsos.
+
+`POST /api/bledata` aceita **dois formatos**, para trás sem quebrar nada: o antigo (array simples `[{"mac","esp_id","rssi"}, ...]`, como os scripts `simulate_hysteresis.py`/`simulate_metrics_trial.py` continuam a enviar) e o novo, em lote (`{"esp_id","node_seq","boot_id","node_time"?,"readings":[{"mac","rssi"}, ...]}`, como o firmware atual usa). Deteção de lotes em falta/duplicados corre em dois sítios: **ao vivo**, impressa na consola do backend a cada POST (aviso "lote(s) em falta"/"lote duplicado"/"reiniciou"); e **offline**, em `analyze_room_decisions.py` (`node_seq_gap_summary` no `run_metadata_<label>.json`, com números por `(esp_id, boot_id)` — contagens citáveis, não dependem de teres visto os prints em tempo real).
+
+Na análise offline, `node_time` só é usado (`effective_time`, coluna `clock_source="node"`) quando **todas** as deteções de um `(mac, experiment_id)` o tiverem **e** vierem de um **único** `esp_id` — caso contrário recua sempre para a hora de receção (`clock_source="server"`). **Limitações a ter em conta, sérias, não apenas teóricas:**
+- **Assim que existirem os 3 nós físicos planeados — precisamente nos ensaios de campo que vão para o relatório — `node_time` deixa de se aplicar** ao cálculo de latências (um grupo com mais de um `esp_id` recua sempre para o servidor). Suportar vários nós exigiria também mudar a ordem que alimenta os algoritmos de decisão (`decision_methods.py`), fora de âmbito por agora. O benefício real, hoje: cumprir a exigência do guião ao nível do firmware, e ficar com os dois instantes gravados lado a lado — o que já permite medir o próprio atraso de rede (`node_time` vs `time`) como diagnóstico, mesmo sem usar `node_time` nas métricas.
+- **O relógio do servidor não é verificado nem garantido sincronizado por este código.** Hoje, deteção e ground truth vêm ambas do relógio do servidor — um desvio absoluto desse relógio cancela-se na subtração e a latência sai correta na mesma. Ao usar `node_time` (relógio do nó, corrigido por NTP) contra o ground truth (continua relógio do servidor), esse cancelamento deixa de acontecer: **se o relógio do servidor estiver desviado, esta funcionalidade piora a precisão da latência em vez de a melhorar.** Verificado nesta máquina de desenvolvimento que o serviço de hora do Windows (`w32tm`) está parado — não assumas que "o Windows já trata disso" sem confirmar.
+- **Resolução de 1 segundo** em `node_time` e `time` (nenhum tem fração de segundo) — como as latências medidas andam tipicamente na ordem de poucos segundos, sincronizar o relógio por NTP não ajuda além do que esta quantização já limita.
+- A rede do hospital pode bloquear NTP externo (porta UDP 123 de saída) — o firmware permite apontar `NTP_SERVER` para um servidor interno, se necessário.
+
 O servidor fica à escuta em `http://0.0.0.0:5000` (todas as interfaces de rede).
 
 ### Verificar que está tudo a funcionar
 ```powershell
-curl http://localhost:5000/api/data -H "X-User: teste"
+curl.exe http://localhost:5000/api/data -H "X-User: teste"
 ```
-Deve devolver `[]` (lista vazia) ou os dispositivos atualmente detetados, sem erro.
+Deve devolver `[]` (lista vazia) ou os dispositivos atualmente detetados, sem erro. **Usa sempre `curl.exe`, não só `curl`** — no PowerShell, `curl` é um alias para `Invoke-WebRequest`, que não percebe `-H`/`-d` da mesma forma (dá erro `Cannot bind parameter 'Headers'`); `curl.exe` chama o curl a sério que já vem com o Windows.
 
 ### Ground truth e parâmetros do ensaio
 Para a avaliação experimental (guião, pontos 2 e 8), há dois tipos de registo novos, além do `experiment_id` já existente:
 
 **Parâmetros de aquisição** — fixos durante a recolha (duração/intervalo de scan, filtragem no firmware), associados ao `experiment_id`. Regista-os ao mesmo tempo que marcas o ensaio:
 ```powershell
-curl -X POST http://localhost:5000/api/experiment -H "X-User: teste" -H "Content-Type: application/json" -d '{"experiment_id":"ensaio1","scan_duration_sec":5,"upload_interval_ms":10000,"firmware_rssi_cutoff":null}'
+curl.exe -X POST http://localhost:5000/api/experiment -H "X-User: teste" -H "Content-Type: application/json" -d '{"experiment_id":"ensaio1","scan_duration_sec":5,"upload_interval_ms":10000,"firmware_rssi_cutoff":null}'
 ```
 Um `POST` posterior que só reafirme o `experiment_id` (sem estes campos) **não apaga** os valores já registados. `GET /api/experiments` lista todos os ensaios registados. Isto fica guardado à parte (coleção `experiments`), nunca dentro do `raw_detections`.
 
@@ -145,6 +159,11 @@ const char* ESP_ID        = "ESP-101";  // tem de coincidir com o mapeamento em 
 ```
 Descobre o IP do portátil com `ipconfig` (adaptador Wi-Fi, endereço IPv4) — **muda sempre que a rede mudar** (DHCP pode atribuir um IP diferente).
 
+### Sincronização NTP e identificação de lotes
+O firmware sincroniza o relógio via NTP no arranque (`syncTime()`, timeout de 10s) e volta a sincronizar de hora a hora (`NTP_RESYNC_INTERVAL_MS`). `NTP_SERVER` é um pool público por default — muda para um servidor NTP interno se a rede do hospital bloquear NTP externo (porta UDP 123 de saída). `TZ_LISBON` é a string POSIX TZ para Europe/Lisbon (com mudança de hora automática, para bater certo com o relógio do servidor) — **confirma isto ao compilar/testar**, foi o único detalhe deste ficheiro que não foi possível verificar sem executar código real no dispositivo.
+
+Cada lote enviado a `/api/bledata` leva `node_seq` (contador local, incrementa a cada envio, mesmo que falhe) e `boot_id` (identifica esta sessão de arranque — gerado com `esp_random()`, que só devolve entropia verdadeira depois do WiFi estar ativo, por isso é gerado depois de `connectWiFi()`, nunca antes). `node_time` (instante de fim do scan) só é incluído no lote se o relógio estiver sincronizado nesse momento — ver secção 1 para o que o backend faz com estes campos.
+
 ### Limitação conhecida: configuração do scan não é remota
 `SCAN_DURATION_SEC` e `UPLOAD_INTERVAL_MS` continuam fixos como `const` no `.ino` — só se mudam recompilando e recarregando o firmware em cada ESP32. O guião (secção 7) pede que isto seja configurável sem recompilar; para isso seria preciso o ESP32 ir buscar a sua configuração ao backend no arranque (ex: um endpoint novo tipo `/api/node-config`), o que ainda não foi implementado. Fica registado como trabalho futuro, não como algo já resolvido.
 
@@ -174,9 +193,9 @@ No fim, imprime um resumo de quantas leituras foram aceites/rejeitadas — compa
 
 ### `analyze_room_decisions.py` — comparação offline dos métodos de decisão
 Lê `raw_detections` da MongoDB e aplica 4 configurações em cadeia (baseline → mediana → mediana+histerese → mediana+histerese+persistência), gerando:
-- `analysis_output/raw_with_decisions_<experiment_id>.csv` — uma linha por deteção, com a decisão de cada método **e a coluna `ground_truth_room`** (sala real, derivada dos eventos marcados em `/ground-truth` — em branco antes da 1ª marcação de um ensaio).
+- `analysis_output/raw_with_decisions_<experiment_id>.csv` — uma linha por deteção, com a decisão de cada método, a coluna `ground_truth_room` (sala real, derivada dos eventos marcados em `/ground-truth` — em branco antes da 1ª marcação de um ensaio), e as colunas `node_time`/`node_seq`/`boot_id`/`effective_time`/`clock_source` (ver secção 1 — `clock_source` diz se essa linha usou o relógio do nó ou do servidor).
 - `analysis_output/decision_summary_<experiment_id>.csv` — métricas por MAC/método (nº de transições, concordância com o método final).
-- `analysis_output/run_metadata_<experiment_id>.json` — metadados desta execução específica: os parâmetros de **análise** usados (`--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--min-rssi`), os parâmetros de **aquisição** de cada `experiment_id` presente nos dados (lidos da coleção `experiments`), e um resumo de quantos eventos de ground truth foram carregados por MAC. É este ficheiro que te permite reanalisar o mesmo ensaio com parâmetros diferentes sem repetir a recolha — cada execução sobrescreve o seu próprio `run_metadata_<label>.json`, nunca os dados brutos.
+- `analysis_output/run_metadata_<experiment_id>.json` — metadados desta execução específica: os parâmetros de **análise** usados (`--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--min-rssi`), os parâmetros de **aquisição** de cada `experiment_id` presente nos dados (lidos da coleção `experiments`), um resumo de quantos eventos de ground truth foram carregados por MAC, um resumo de cobertura de `node_time`/`node_seq` por MAC (`node_time_summary`), a deteção offline de lotes em falta/duplicados por `(esp_id, boot_id)` (`node_seq_gap_summary` — ver secção 1), e um aviso citável (`node_time_clock_warning`, `null` se não se aplicar) sempre que algum grupo tenha usado o relógio do nó em vez do servidor. É este ficheiro que te permite reanalisar o mesmo ensaio com parâmetros diferentes sem repetir a recolha — cada execução sobrescreve o seu próprio `run_metadata_<label>.json`, nunca os dados brutos.
 - `plots/<mac>_<experiment_id>_room_timeline.png` — gráfico com o RSSI bruto e a decisão de cada método ao longo do tempo.
 
 ```powershell
@@ -207,10 +226,10 @@ Depende. Se um é **pai** do outro (`Get-CimInstance Win32_Process | Select Proc
 Ver secção 2 acima — normalmente resolve-se com `DANGEROUSLY_DISABLE_HOST_CHECK=true` (só se o fix do proxy `127.0.0.1` não for suficiente) num ficheiro `.env.development.local` dentro de `frontend/` (fica fora do git). Reinicia o `npm start` depois de qualquer alteração a variáveis de ambiente ou ao `proxy`.
 
 **500 Internal Server Error em `/api/login` ou `/api/signup`, sem traceback na consola**
-Confirma primeiro que só tens **um** processo do backend a correr (ver acima) — é a causa mais comum de "a consola que estou a ver não é a que está a responder". Depois testa o endpoint diretamente com `curl` para veres o traceback completo.
+Confirma primeiro que só tens **um** processo do backend a correr (ver acima) — é a causa mais comum de "a consola que estou a ver não é a que está a responder". Depois testa o endpoint diretamente com `curl.exe` (não só `curl` — ver nota na secção 1) para veres o traceback completo.
 
 **Mirth Connect inacessível (timeout ao mudar de sala)**
 Usa o `mock_mirth.py` + `MIRTH_URL` (secção 4) para testar sem depender da rede do hospital.
 
 **ESP32 não regista deteções novas / valores presos no dashboard**
-Confirma com dois `curl` seguidos a `/api/all-beacons` se o `time` de cada beacon está mesmo a mudar — se estiver idêntico, o problema é o ESP32 não estar a enviar (`POST /api/bledata`), não o frontend. Verifica o Serial Monitor do ESP32.
+Confirma com dois `curl.exe` seguidos a `/api/all-beacons` se o `time` de cada beacon está mesmo a mudar — se estiver idêntico, o problema é o ESP32 não estar a enviar (`POST /api/bledata`), não o frontend. Verifica o Serial Monitor do ESP32.
