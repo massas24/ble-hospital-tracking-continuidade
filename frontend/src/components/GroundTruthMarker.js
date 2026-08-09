@@ -5,23 +5,86 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
 
+const SCENARIOS = [
+  { value: "centro_sala", label: "Centro da sala" },
+  { value: "junto_parede", label: "Junto à parede" },
+  { value: "junto_porta", label: "Junto à porta" },
+  { value: "movimento", label: "Movimento entre salas" },
+];
+const SCENARIO_LABELS = Object.fromEntries(SCENARIOS.map(s => [s.value, s.label]));
+
+// Acima disto (minutos), o indicador de ensaio ativo passa de verde a
+// laranja - um ensaio esquecido agora sobrevive a reinícios do backend e a
+// dias inteiros (ver README), por isso isto é o que o torna preventivo em
+// vez de só informativo.
+const STALE_EXPERIMENT_THRESHOLD_MIN = 120;
+
+function suggestExperimentName() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `ensaio_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}`;
+}
+
+// Só formata um número de minutos já calculado pelo SERVIDOR
+// (experiment_elapsed_min) - nunca faz aritmética de datas aqui. O
+// telemóvel e o servidor não partilham necessariamente o mesmo relógio, e
+// este projeto já confirmou que o serviço de hora do Windows pode estar
+// parado na máquina do servidor - qualquer comparação feita no browser
+// entre Date.now() e um timestamp do servidor não seria fiável.
+function formatElapsed(elapsedMin) {
+  if (elapsedMin == null) return null;
+  const rounded = Math.round(elapsedMin);
+  return rounded < 60 ? `${rounded} min` : `${Math.floor(rounded / 60)}h${String(rounded % 60).padStart(2, "0")}`;
+}
+
 function GroundTruthMarker() {
   const username = localStorage.getItem("username");
   const headers = { "X-User": username };
 
   const [experimentId, setExperimentId] = useState(null);
+  const [experimentStartedAt, setExperimentStartedAt] = useState(null);
+  const [experimentElapsedMin, setExperimentElapsedMin] = useState(null);
   const [macs, setMacs] = useState([]);
   const [rooms, setRooms] = useState([]);
   const [selectedMac, setSelectedMac] = useState(localStorage.getItem("groundTruthMac") || "");
+  const [scenario, setScenario] = useState(localStorage.getItem("groundTruthScenario") || "centro_sala");
   const [recentTaps, setRecentTaps] = useState([]);
   const [error, setError] = useState("");
   const [manualTime, setManualTime] = useState(false);
   const [manualTimeValue, setManualTimeValue] = useState("");
 
-  useEffect(() => {
+  const [showStartForm, setShowStartForm] = useState(false);
+  const [newExperimentName, setNewExperimentName] = useState("");
+  const [pendingOverwriteName, setPendingOverwriteName] = useState(null);
+  const [recentExperiments, setRecentExperiments] = useState([]);
+  const [endedSummary, setEndedSummary] = useState(null);
+
+  const refreshExperimentStatus = () => {
     axios.get("/api/experiment", { headers })
-      .then(res => setExperimentId(res.data.experiment_id))
-      .catch(() => setExperimentId(null));
+      .then(res => {
+        setExperimentId(res.data.experiment_id);
+        setExperimentStartedAt(res.data.experiment_started_at);
+        setExperimentElapsedMin(res.data.experiment_elapsed_min);
+      })
+      .catch(() => {
+        setExperimentId(null);
+        setExperimentStartedAt(null);
+        setExperimentElapsedMin(null);
+      });
+  };
+
+  const fetchRecentExperiments = () => {
+    axios.get("/api/experiments", { headers })
+      .then(res => {
+        const sorted = [...res.data].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+        setRecentExperiments(sorted.slice(0, 8));
+      })
+      .catch(() => setRecentExperiments([]));
+  };
+
+  useEffect(() => {
+    refreshExperimentStatus();
+    fetchRecentExperiments();
 
     axios.get("/api/whitelist", { headers })
       .then(res => setMacs(res.data.map(w => w.mac)))
@@ -33,11 +96,83 @@ function GroundTruthMarker() {
         setRooms(distinctRooms);
       })
       .catch(() => setRooms([]));
+
+    // "ativo há X min" e o limiar de laranja só têm sentido se forem
+    // razoavelmente atuais - como experiment_elapsed_min vem sempre do
+    // servidor (nunca de um relógio local), a única forma correta de os
+    // manter atualizados é voltar a perguntar ao servidor de vez em
+    // quando, não inferir localmente.
+    const interval = setInterval(refreshExperimentStatus, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   const chooseMac = (mac) => {
     setSelectedMac(mac);
     localStorage.setItem("groundTruthMac", mac);
+  };
+
+  const chooseScenario = (value) => {
+    setScenario(value);
+    localStorage.setItem("groundTruthScenario", value);
+  };
+
+  const openStartForm = () => {
+    setError("");
+    setNewExperimentName(suggestExperimentName());
+    setPendingOverwriteName(null);
+    setShowStartForm(true);
+  };
+
+  const startExperiment = async (name) => {
+    setError("");
+    try {
+      const res = await axios.post("/api/experiment", { experiment_id: name }, { headers });
+      setExperimentId(res.data.experiment_id);
+      setExperimentStartedAt(res.data.experiment_started_at || null);
+      setExperimentElapsedMin(res.data.experiment_elapsed_min);
+      setShowStartForm(false);
+      setNewExperimentName("");
+      // Populado quando este arranque substituiu um ensaio ativo (ver
+      // backend); null num arranque limpo - qualquer dos dois casos deve
+      // substituir/limpar o painel anterior.
+      setEndedSummary(res.data.ended_summary || null);
+      fetchRecentExperiments();
+    } catch (err) {
+      setError(err.response?.data?.error || "Falha ao iniciar o ensaio");
+    }
+  };
+
+  const submitStartForm = () => {
+    const name = newExperimentName.trim();
+    if (!name) {
+      setError("Indica um nome para o ensaio");
+      return;
+    }
+    if (experimentId) {
+      setPendingOverwriteName(name);
+      return;
+    }
+    startExperiment(name);
+  };
+
+  const confirmOverwrite = () => {
+    startExperiment(pendingOverwriteName);
+    setPendingOverwriteName(null);
+  };
+  const cancelOverwrite = () => setPendingOverwriteName(null);
+
+  const stopExperiment = async () => {
+    setError("");
+    try {
+      const res = await axios.post("/api/experiment", { experiment_id: null }, { headers });
+      setExperimentId(res.data.experiment_id);
+      setExperimentStartedAt(res.data.experiment_started_at || null);
+      setExperimentElapsedMin(res.data.experiment_elapsed_min);
+      setEndedSummary(res.data.ended_summary || null);
+      fetchRecentExperiments();
+    } catch (err) {
+      setError(err.response?.data?.error || "Falha ao terminar o ensaio");
+    }
   };
 
   const tapRoom = async (room) => {
@@ -46,7 +181,7 @@ function GroundTruthMarker() {
       setError("Escolhe primeiro o MAC do beacon");
       return;
     }
-    const body = { mac: selectedMac, room };
+    const body = { mac: selectedMac, room, scenario };
     if (manualTime && manualTimeValue) {
       body.time = manualTimeValue.replace("T", " ") + ":00";
     }
@@ -67,15 +202,95 @@ function GroundTruthMarker() {
     }
   };
 
+  const isStale = experimentElapsedMin != null && experimentElapsedMin >= STALE_EXPERIMENT_THRESHOLD_MIN;
+
   return (
     <div style={{ maxWidth: 480, margin: "auto", padding: 16 }}>
       <h3 className="mb-3">Ground Truth</h3>
 
-      {experimentId ? (
-        <div className="alert alert-info py-2">Ensaio atual: <strong>{experimentId}</strong></div>
-      ) : (
-        <div className="alert alert-danger py-2">
-          Sem experiment_id ativo — as marcações vão ficar sem ensaio associado. Define um em <code>/api/experiment</code> antes de começares.
+      {/* Indicador persistente do ensaio ativo - substitui o antigo alerta
+          vermelho/azul binário. Nunca bloqueia as marcações. */}
+      <div className={`alert ${experimentId ? (isStale ? "alert-warning" : "alert-success") : "alert-secondary"} py-2`}>
+        {experimentId ? (
+          <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span>
+              <strong>{experimentId}</strong> — ativo há {formatElapsed(experimentElapsedMin) || "instantes"}
+              {isStale && <span> — ainda precisas disto ativo?</span>}
+            </span>
+            <div className="d-flex gap-2">
+              <button className="btn btn-sm btn-outline-primary" onClick={openStartForm}>Iniciar ensaio</button>
+              <button className="btn btn-sm btn-outline-danger" onClick={stopExperiment}>Terminar ensaio</button>
+            </div>
+          </div>
+        ) : (
+          <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span>Sem ensaio ativo — as marcações vão ficar sem ensaio associado.</span>
+            <button className="btn btn-sm btn-primary" onClick={openStartForm}>Iniciar ensaio</button>
+          </div>
+        )}
+      </div>
+
+      {/* Formulário inline de início (nunca window.prompt()) */}
+      {showStartForm && (
+        <div className="card p-3 mb-3">
+          {pendingOverwriteName ? (
+            <div className="alert alert-warning py-2 mb-0">
+              <strong>{experimentId}</strong> a decorrer há {formatElapsed(experimentElapsedMin) || "instantes"} — substituir por <strong>{pendingOverwriteName}</strong>?
+              <div className="d-flex gap-2 mt-2">
+                <button className="btn btn-sm btn-danger" onClick={confirmOverwrite}>Sim, substituir</button>
+                <button className="btn btn-sm btn-secondary" onClick={cancelOverwrite}>Cancelar</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <label className="form-label">Nome do ensaio</label>
+              <input type="text" className="form-control mb-2"
+                value={newExperimentName} onChange={e => setNewExperimentName(e.target.value)} />
+              <div className="d-flex gap-2 mb-2">
+                <button className="btn btn-sm btn-primary" onClick={submitStartForm}>Confirmar</button>
+                <button className="btn btn-sm btn-secondary" onClick={() => setShowStartForm(false)}>Cancelar</button>
+              </div>
+              {recentExperiments.length > 0 && (
+                <div>
+                  <small className="text-muted">Ensaios recentes:</small>
+                  <ul className="list-unstyled mb-0" style={{ fontSize: "0.85em" }}>
+                    {recentExperiments.map(exp => (
+                      <li key={exp.experiment_id} className="text-muted">{exp.experiment_id}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Resumo automático - aparece depois de "Terminar" e também depois
+          de um "Iniciar" que substituiu um ensaio ativo */}
+      {endedSummary && (
+        <div className="card p-3 mb-3">
+          <div className="d-flex justify-content-between align-items-center mb-2">
+            <h6 className="mb-0">Resumo: {endedSummary.experiment_id}</h6>
+            <button className="btn btn-sm btn-outline-secondary" onClick={() => setEndedSummary(null)}>Fechar</button>
+          </div>
+          {endedSummary.macs.length === 0 ? (
+            <p className="text-muted mb-0">Sem dados registados neste ensaio.</p>
+          ) : (
+            <table className="table table-sm mb-0">
+              <thead><tr><th>MAC</th><th>Deteções</th><th>Eventos GT</th><th>Transições</th><th>Duração</th></tr></thead>
+              <tbody>
+                {endedSummary.macs.map(m => (
+                  <tr key={m.mac}>
+                    <td>{m.mac}</td>
+                    <td>{m.num_raw_detections}</td>
+                    <td>{m.num_ground_truth_events}</td>
+                    <td>{m.num_transitions}</td>
+                    <td>{m.duration_sec != null ? `${Math.round(m.duration_sec)}s` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 
@@ -112,6 +327,25 @@ function GroundTruthMarker() {
         )}
       </div>
 
+      {/* Cenário (guião secção 9) - default "Centro da sala", lembrado por
+          dispositivo. "Vários beacons" (5º cenário do guião) fica de fora
+          de propósito - é uma condição do ensaio inteiro, não por toque. */}
+      <div className="mb-3">
+        <label className="form-label d-block">Cenário</label>
+        <div className="d-flex flex-wrap gap-2">
+          {SCENARIOS.map(s => (
+            <button key={s.value} type="button"
+              className={`btn btn-sm ${scenario === s.value ? "btn-secondary" : "btn-outline-secondary"}`}
+              onClick={() => chooseScenario(s.value)} style={{ flex: "1 1 45%" }}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <small className="text-muted d-block mt-1">
+          Aplica-se a todas as leituras até à próxima marcação — se mudares de cenário sem mudar de sala, toca na sala outra vez para o registar.
+        </small>
+      </div>
+
       {error && <div className="alert alert-warning py-2">{error}</div>}
 
       <div className="d-grid gap-2 mb-4">
@@ -133,7 +367,7 @@ function GroundTruthMarker() {
       <ul className="list-group">
         {recentTaps.map(tap => (
           <li key={tap.id} className="list-group-item d-flex justify-content-between align-items-center">
-            <span>{tap.time} — {tap.room}</span>
+            <span>{tap.time} — {tap.room}{tap.scenario ? ` (${SCENARIO_LABELS[tap.scenario] || tap.scenario})` : ""}</span>
             <button className="btn btn-sm btn-outline-danger" onClick={() => undoTap(tap.id)}>
               Desfazer
             </button>

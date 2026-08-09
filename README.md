@@ -41,6 +41,9 @@ pip install -r requirements-analysis.txt
 | `LOCATION_STATUS_HISTORY_SIZE` | `30` | Quantas `raw_detections` recentes por MAC são usadas para recalcular a cadeia mediana+histerese+persistência a cada deteção nova (ver `location_status` mais abaixo). |
 | `INACTIVE_TIMEOUT_SEC` | `60` | Segundos sem deteção até um beacon whitelisted passar a `location_status: "desconhecida"`. Calculado em tempo de leitura (`/api/beacon-latest`, `/api/all-beacons`), não gravado. |
 | `MIN_RSSI` | *(vazio = desativado)* | Limiar mínimo de RSSI (dBm) — leituras mais fracas são ignoradas pela camada de decisão do `location_status` (não pela histerese ao vivo nem pelo `raw_detections`, que ficam sempre completos). Desativado por default; ver nota metodológica abaixo. |
+| `NODE_RATE_WINDOW_SEC` | `300` | Janela (segundos) usada pelo painel de estado dos nós (`/api/node-status`) para `detections_per_min` e `median_rssi_dbm` — ver secção 2, página "Estado dos Nós". |
+| `DB_NAME` | `temp1_db` | Nome da base de dados MongoDB usada pelo backend. Muda para isolar uma instância de verificação (ex: `temp1_db_verify`) sem tocar nos dados reais de ensaios — mesmo `mongod` local, isolamento só pelo nome. |
+| `PORT` | `5000` | Porta onde o backend fica à escuta. Combina com `DB_NAME` para correr uma instância de verificação em paralelo com a real, sem conflito. |
 
 **Forma prática de definir isto sem repetir a cada terminal novo**: copia `backend/.env.example` para `backend/.env` e edita os valores que quiseres mudar — o `app.py` carrega-o automaticamente no arranque (`python-dotenv`). O `.env` real fica fora do git (`.gitignore`), cada máquina/pessoa tem o seu; sem esse ficheiro, tudo continua exatamente como na tabela acima.
 ```powershell
@@ -81,21 +84,67 @@ curl.exe http://localhost:5000/api/data -H "X-User: teste"
 ```
 Deve devolver `[]` (lista vazia) ou os dispositivos atualmente detetados, sem erro. **Usa sempre `curl.exe`, não só `curl`** — no PowerShell, `curl` é um alias para `Invoke-WebRequest`, que não percebe `-H`/`-d` da mesma forma (dá erro `Cannot bind parameter 'Headers'`); `curl.exe` chama o curl a sério que já vem com o Windows.
 
+**Testar isolado, sem tocar em `temp1_db`/porta 5000**: combina `DB_NAME` e `PORT` para correr uma segunda instância a apontar para uma base de dados de teste, em paralelo com a real:
+```powershell
+$env:DB_NAME = "temp1_db_verify"
+$env:PORT = "5001"
+python app.py
+```
+Mesmo `mongod` local — `temp1_db_verify` fica completamente isolada (coleções e índices próprios, criados automaticamente no arranque), sem partilhar nada com `temp1_db`.
+
 ### Ground truth e parâmetros do ensaio
-Para a avaliação experimental (guião, pontos 2 e 8), há dois tipos de registo novos, além do `experiment_id` já existente:
+Para a avaliação experimental (guião, pontos 2 e 8), há dois tipos de registo novos, além do `experiment_id` já existente.
+
+**Fluxo principal: os botões "Iniciar ensaio"/"Terminar ensaio" na página `/ground-truth` (secção 2)** — pensados para nunca precisares do terminal a meio de um ensaio. "Iniciar" sugere um nome com data/hora (editável antes de confirmares); se já houver um ensaio ativo, pede confirmação antes de o substituir. "Terminar" (ou substituir um ativo por outro) mostra logo um resumo por MAC (deteções, eventos de ground truth, transições, duração) — para saberes se o ensaio foi válido antes de saíres do sítio. O indicador do ensaio ativo fica **verde** normalmente e **laranja** passadas 2h (`STALE_EXPERIMENT_THRESHOLD_MIN`) — um ensaio esquecido sobrevive a reinícios do backend e a dias inteiros (ver mais abaixo), por isso este limiar é preventivo, não só informativo.
+
+Os comandos `curl.exe`/`Invoke-RestMethod` abaixo continuam a funcionar exatamente na mesma — ficam como alternativa via terminal, ou para scripting:
 
 **Parâmetros de aquisição** — fixos durante a recolha (duração/intervalo de scan, filtragem no firmware), associados ao `experiment_id`. Regista-os ao mesmo tempo que marcas o ensaio:
 ```powershell
 curl.exe -X POST http://localhost:5000/api/experiment -H "X-User: teste" -H "Content-Type: application/json" -d '{"experiment_id":"ensaio1","scan_duration_sec":5,"upload_interval_ms":10000,"firmware_rssi_cutoff":null}'
 ```
-Um `POST` posterior que só reafirme o `experiment_id` (sem estes campos) **não apaga** os valores já registados. `GET /api/experiments` lista todos os ensaios registados. Isto fica guardado à parte (coleção `experiments`), nunca dentro do `raw_detections`.
+Um `POST` posterior que só reafirme o `experiment_id` (sem estes campos) **não apaga** os valores já registados. `GET /api/experiments` lista todos os ensaios registados (agora sempre com `created_at`, mesmo para ensaios iniciados sem nenhum parâmetro de aquisição). Isto fica guardado à parte (coleção `experiments`), nunca dentro do `raw_detections`.
+
+A resposta de `GET`/`POST /api/experiment` inclui também:
+- `experiment_started_at` — quando o ensaio ativo começou.
+- `experiment_elapsed_min` — minutos decorridos, **sempre calculado no servidor**, nunca no cliente (o relógio do telemóvel e o do servidor não são a mesma referência — ver limitação do relógio do servidor, mais abaixo — por isso o `/ground-truth` nunca faz essa conta sozinho).
+- `ended_summary` (só quando um `POST` muda o `experiment_id` ativo para outra coisa — `null` ou outro nome) — o resumo por MAC do ensaio que acabou de ser abandonado.
+
+**O ensaio ativo sobrevive a um reinício do backend.** Fica também guardado numa coleção pequena (`app_state`, um único documento, sempre substituído no lugar), recarregada no arranque do `app.py` — antes disto, reiniciar o backend a meio de um ensaio apagava-o silenciosamente da memória, e as deteções/marcações seguintes ficavam sem `experiment_id`, sem aviso nenhum.
 
 **Ground truth** — onde o beacon esteve *realmente*, ao longo do tempo. Modelado como eventos discretos ("entrei na sala X agora"), não como intervalos diretos:
-- `POST /api/ground-truth` `{mac, room, experiment_id?, time?, note?}` — `experiment_id` usa por default o ensaio ativo no momento; `time` é opcional (`"YYYY-MM-DD HH:MM:SS"`) para entrada retroativa, senão usa a hora do servidor.
+- `POST /api/ground-truth` `{mac, room, experiment_id?, time?, scenario?, note?}` — `experiment_id` usa por default o ensaio ativo no momento; `time` é opcional (`"YYYY-MM-DD HH:MM:SS"`) para entrada retroativa, senão usa a hora do servidor.
 - `GET /api/ground-truth?experiment_id=&mac=` — lista para revisão.
 - `DELETE /api/ground-truth/<id>` — desfaz uma marcação errada.
 
+**`scenario`** (guião secção 9, "Comparação por cenário") — um de `centro_sala`, `junto_parede`, `junto_porta`, `movimento` (não validado no servidor, campo livre como o `note`). Corresponde a 4 dos 5 cenários do guião — falta "Vários beacons" de propósito: essa é uma condição do **ensaio inteiro** (quantos beacons ativos em simultâneo), não algo por marcação, já fica implícita em quantos beacons estão na whitelist durante o ensaio.
+
+**Nota metodológica importante sobre `scenario`**: aplica-se a **todo o intervalo até à próxima marcação**, não a uma leitura isolada — exatamente como já acontece com a sala (`ground_truth_room`). Se tocares "Corredor / Centro da sala" e depois andares até à porta sem tocar de novo, todas as leituras nesse intervalo (mesmo já perto da porta) ficam etiquetadas "Centro da sala". **Para a comparação por cenário da secção 9 fazer sentido, tens de tocar sempre que mudas de cenário — mesmo que a sala não mude.**
+
 Ver secção 2 para a página do dashboard que faz isto na prática (`/ground-truth`). Os intervalos de ground truth (`"esteve em X entre T1 e T2"`) são derivados só na análise offline (secção 4), emparelhando eventos consecutivos do mesmo ensaio — não ficam guardados como intervalos na BD.
+
+### Estado dos nós, histórico pesquisável e exportação (guião secção 3.11)
+Dashboard como ferramenta operacional, não só de demonstração — três endpoints novos, pensados para diagnosticar problemas de infraestrutura (nó mal posicionado, nó a não comunicar, falhas a chegar ao Mirth) *antes* de aparecerem na análise offline de um ensaio já terminado.
+
+**`GET /api/node-status`** — por cada `esp_id` (configurado em `esp_mapping`, mesmo que nunca tenha enviado nada — aparece como offline, não como ausente):
+```powershell
+curl.exe http://localhost:5000/api/node-status -H "X-User: teste"
+```
+Devolve `{"nodes": [...], "rate_window_sec": 300, "mirth": {...}}`. Cada nó: `esp_id, room, boot_id, last_seen, seconds_since_last_seen, detections_per_min, median_rssi_dbm, gap_count, duplicate_count, reorder_count`. Não classifica online/offline no servidor — isso é feito na página "Estado dos Nós" (secção 2), contra um limiar ajustável ali mesmo, sem reiniciar o backend.
+
+**`detections_per_min` vs `median_rssi_dbm` — não são a mesma coisa, e um sozinho não basta**: `detections_per_min` conta TODO o tráfego BLE de cada scan (qualquer dispositivo, não só beacons seguidos — 60+ por ciclo em dados reais, dominado por ruído ambiente), é só um sinal de que o nó está vivo e a escanear. Já aconteceu, num ensaio real, os 3 nós detetarem ao mesmo ritmo enquanto um deles via os beacons whitelisted a -80/-90 dBm contra -60/-77 dBm dos vizinhos no mesmo instante — `detections_per_min` sozinho não teria mostrado nada de errado. `median_rssi_dbm` (mediana do RSSI dos beacons whitelisted na mesma janela, `NODE_RATE_WINDOW_SEC`) é o que efetivamente distingue um nó mal posicionado/degradado de um saudável.
+
+**`mirth`** (`last_success`, `last_failure`, `failure_count_session`) — hoje uma falha ao enviar para o Mirth só aparece impressa na consola do backend; estes contadores dão-lhe visibilidade no dashboard. Não é uma fila de reenvio (isso seria uma funcionalidade maior, fora de âmbito aqui) — só visibilidade de se os envios recentes estão a ter sucesso.
+
+**`GET /api/detection-history`** — histórico pesquisável, filtros por sala, beacon (MAC) e intervalo temporal, todos opcionais:
+```powershell
+curl.exe "http://localhost:5000/api/detection-history?room=Sala1&start=2026-08-08%2010:00:00&end=2026-08-08%2011:00:00" -H "X-User: teste"
+```
+Devolve `{"results": [...], "truncated": bool}` — no máximo 500 linhas (`limit`, até 5000). `truncated: true` avisa que há mais dados do que os devolvidos — refina os filtros.
+
+**`GET /api/detection-history/export`** — mesmos filtros, devolve CSV (`time, mac, room, esp_id, rssi, node_time, node_seq, boot_id, batch_id, experiment_id`), até 5000 linhas. **Isto é para consultas pontuais/filtradas a partir do dashboard, não para substituir o `analyze_room_decisions.py`** (secção 4) como exportação completa de um ensaio inteiro. Se o filtro corresponder a mais de 5000 linhas, o corte é sinalizado de duas formas — nunca dentro dos próprios dados do CSV, para não poluir uma análise posterior em pandas/Excel: o header HTTP `X-Export-Truncated`, e um sufixo `_truncated` no nome do ficheiro descarregado (visível mesmo fora da app).
+
+**Caveat conhecido, não corrigível sem reprocessar dados antigos**: `raw_detections.room` reflete o nome da sala **no momento da deteção**, copiado do `esp_mapping` de então — se renomeares uma sala mais tarde, deteções antigas continuam com o nome antigo e não aparecem ao filtrares pelo nome novo.
 
 ---
 
@@ -131,13 +180,22 @@ que aparece no browser disfarçado de "500 Internal Server Error". Usar o IP `12
 Página pensada para usar no **telemóvel**, a andar fisicamente com o beacon, longe do portátil. Acessível pela ligação "Ground Truth" na sidebar, ou diretamente pelo URL `http://<IP-do-portátil>:3000/ground-truth` — vale a pena **adicionar aos favoritos/ecrã principal do telemóvel** para acesso rápido a meio de um ensaio. Fica fora do layout de desktop (sem sidebar fixa), só precisa de autenticação normal (mesmo login que já usas — o telemóvel também guarda a sessão em `localStorage` depois de entrares uma vez).
 
 Como usar:
-1. Mostra o `experiment_id` ativo em destaque (aviso vermelho se não houver nenhum).
-2. Escolhe o beacon (MAC) num `<select>` — fica guardado no telemóvel para a próxima vez.
-3. Toca no botão grande da sala onde estás **agora** — cada toque envia logo um evento com a hora do servidor.
-4. **"Hora manual"**: alternador que revela um campo de data/hora, para entrada retroativa (ex: sem rede no momento — anotas mentalmente as horas e introduzes tudo depois, já com rede).
-5. Lista das últimas marcações desta sessão, cada uma com um botão **"Desfazer"** — para os toques errados, que vão acontecer.
+1. **Indicador do ensaio ativo**, sempre visível: verde com o nome + "ativo há X min" (calculado no servidor, nunca no telemóvel), laranja passadas 2h (ensaio provavelmente esquecido), ou neutro se não houver nenhum — nunca bloqueia as marcações seguintes.
+2. **"Iniciar ensaio"**: abre um formulário inline com um nome sugerido (data/hora), editável antes de confirmares. Se já houver um ensaio ativo, pede confirmação antes de o substituir (mostra o nome e há quanto tempo está ativo). Mostra também os últimos ensaios usados, para não repetires um nome sem querer.
+3. **"Terminar ensaio"** (ou confirmar a substituição de um ativo): mostra logo um resumo por MAC — deteções, eventos de ground truth, transições, duração — antes de guardares o telemóvel.
+4. Escolhe o beacon (MAC) num `<select>` — fica guardado no telemóvel para a próxima vez.
+5. **Cenário** (guião secção 9): 4 botões (Centro da sala / Junto à parede / Junto à porta / Movimento entre salas), o escolhido fica guardado no telemóvel entre toques. Aplica-se a todo o intervalo até à próxima marcação — muda de cenário sem mudar de sala exige tocar na sala outra vez (ver nota na secção 1).
+6. Toca no botão grande da sala onde estás **agora** — cada toque envia logo um evento com a hora do servidor e o cenário selecionado.
+7. **"Hora manual"**: alternador que revela um campo de data/hora, para entrada retroativa (ex: sem rede no momento — anotas mentalmente as horas e introduzes tudo depois, já com rede).
+8. Lista das últimas marcações desta sessão (com o cenário entre parêntesis, quando presente), cada uma com um botão **"Desfazer"** — para os toques errados, que vão acontecer.
 
 Os eventos ficam guardados como pontos no tempo (não intervalos) — os intervalos ("esteve na sala X entre T1 e T2") só são calculados depois, no `analyze_room_decisions.py`.
+
+### Página `/node-status` — "Estado dos Nós"
+Um `esp_id` por linha: online/offline (badge, limiar ajustável num campo na própria página — sem precisar reiniciar o backend), última comunicação, deteções/min, RSSI mediano (dBm) dos beacons whitelisted, lotes perdidos/duplicados/reordenados na sessão atual do backend. Nota curta na própria página lembra que "deteções/min" e "RSSI mediano" respondem a perguntas diferentes (ver secção 1) — um nó pode escanear normalmente e ainda assim estar mal posicionado. Secção pequena à parte com o estado da integração Mirth (última confirmação/falha, nº de falhas). Atualiza a cada 5s.
+
+### Página `/history` — "Histórico"
+Filtros por sala, beacon (MAC) e intervalo temporal (todos opcionais), botão "Pesquisar" e botão "Exportar CSV" (usa os mesmos filtros). Um filtro sem resultados mostra uma mensagem em vez de uma tabela vazia; um filtro com mais de 500/5000 linhas (ecrã/CSV) mostra um aviso de truncagem — ver secção 1 para os detalhes e o porquê do limite.
 
 ---
 
@@ -193,7 +251,7 @@ No fim, imprime um resumo de quantas leituras foram aceites/rejeitadas — compa
 
 ### `analyze_room_decisions.py` — comparação offline dos métodos de decisão
 Lê `raw_detections` da MongoDB e aplica 4 configurações em cadeia (baseline → mediana → mediana+histerese → mediana+histerese+persistência), gerando:
-- `analysis_output/raw_with_decisions_<experiment_id>.csv` — uma linha por deteção, com a decisão de cada método, a coluna `ground_truth_room` (sala real, derivada dos eventos marcados em `/ground-truth` — em branco antes da 1ª marcação de um ensaio), e as colunas `node_time`/`node_seq`/`boot_id`/`effective_time`/`clock_source` (ver secção 1 — `clock_source` diz se essa linha usou o relógio do nó ou do servidor).
+- `analysis_output/raw_with_decisions_<experiment_id>.csv` — uma linha por deteção, com a decisão de cada método, as colunas `ground_truth_room`/`ground_truth_scenario` (sala real e cenário, derivados dos eventos marcados em `/ground-truth` — em branco antes da 1ª marcação de um ensaio; `ground_truth_scenario` só expõe o dado, não há ainda nenhuma análise que o agregue), e as colunas `node_time`/`node_seq`/`boot_id`/`effective_time`/`clock_source` (ver secção 1 — `clock_source` diz se essa linha usou o relógio do nó ou do servidor).
 - `analysis_output/decision_summary_<experiment_id>.csv` — métricas por MAC/método (nº de transições, concordância com o método final).
 - `analysis_output/run_metadata_<experiment_id>.json` — metadados desta execução específica: os parâmetros de **análise** usados (`--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--min-rssi`), os parâmetros de **aquisição** de cada `experiment_id` presente nos dados (lidos da coleção `experiments`), um resumo de quantos eventos de ground truth foram carregados por MAC, um resumo de cobertura de `node_time`/`node_seq` por MAC (`node_time_summary`), a deteção offline de lotes em falta/duplicados por `(esp_id, boot_id)` (`node_seq_gap_summary` — ver secção 1), e um aviso citável (`node_time_clock_warning`, `null` se não se aplicar) sempre que algum grupo tenha usado o relógio do nó em vez do servidor. É este ficheiro que te permite reanalisar o mesmo ensaio com parâmetros diferentes sem repetir a recolha — cada execução sobrescreve o seu próprio `run_metadata_<label>.json`, nunca os dados brutos.
 - `plots/<mac>_<experiment_id>_room_timeline.png` — gráfico com o RSSI bruto e a decisão de cada método ao longo do tempo.
@@ -204,7 +262,7 @@ python analyze_room_decisions.py --experiment-id <id> --mac aa:bb:cc:dd:ee:01
 python analyze_room_decisions.py                       # todos os ensaios, todos os MACs
 python analyze_room_decisions.py --experiment-id <id> --min-rssi -70   # ignora leituras mais fracas que -70 dBm
 ```
-Principais opções: `--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--min-rssi` (default: sem filtro — ver nota metodológica acima sobre o cutoff de -60 dBm da Bella), `--no-plots`, `--mongo-uri`.
+Principais opções: `--hysteresis-margin`, `--median-window`, `--persistence-streak`, `--min-rssi` (default: sem filtro — ver nota metodológica acima sobre o cutoff de -60 dBm da Bella), `--no-plots`, `--mongo-uri`, `--db-name` (default `temp1_db` — aponta a análise a outra base de dados, ex: uma de teste, sem editar o script).
 
 Usa `POST /api/experiment {"experiment_id": "..."}` antes de um ensaio real para conseguires filtrar os dados desse ensaio especificamente.
 

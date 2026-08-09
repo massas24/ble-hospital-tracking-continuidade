@@ -125,7 +125,7 @@ def load_ground_truth_by_mac(collection, experiment_id, macs):
         mac_query["mac"] = mac
         events = list(
             collection.find(
-                mac_query, {"experiment_id": 1, "mac": 1, "room": 1, "time": 1}
+                mac_query, {"experiment_id": 1, "mac": 1, "room": 1, "time": 1, "scenario": 1}
             ).sort([("time", 1), ("_id", 1)])
         )
         data_by_mac[mac] = events
@@ -147,22 +147,25 @@ def build_ground_truth_intervals(events):
         intervals = []
         for i, ev in enumerate(evs):
             end = evs[i + 1]["time"] if i + 1 < len(evs) else None
-            intervals.append({"room": ev["room"], "start": ev["time"], "end": end})
+            intervals.append({"room": ev["room"], "scenario": ev.get("scenario"), "start": ev["time"], "end": end})
         intervals_by_experiment[experiment_id] = intervals
     return intervals_by_experiment
 
 
-def lookup_ground_truth_room(intervals, time_str):
+def lookup_ground_truth_interval(intervals, time_str):
     """Comparação de strings simples - segura porque "%Y-%m-%d %H:%M:%S" é um
     formato de largura fixa, preenchido com zeros, que classifica/compara corretamente como strings simples,
     de forma consistente com a forma como este ficheiro já evita a análise de data e hora
-    noutros lugares. Retorna None se time_str estiver fora de todos os intervalos (por ex.
-    antes da primeira verificação ou se não existir qualquer valor de referência)."""
+    noutros lugares. Devolve o INTERVALO completo ({"room","scenario","start","end"})
+    que cobre time_str, ou None se estiver fora de todos os intervalos (por ex.
+    antes da primeira marcação, ou sem ground truth nenhum) - devolver o
+    intervalo inteiro, em vez de só a sala, serve room E scenario a partir
+    de UMA única passagem O(n), em vez de dois varrimentos separados."""
     if not time_str:
         return None
     for interval in intervals:
         if interval["start"] <= time_str and (interval["end"] is None or time_str < interval["end"]):
-            return interval["room"]
+            return interval
     return None
 
 
@@ -230,7 +233,9 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persiste
         # filter - in "all experiments" mode a single mac's docs can span
         # more than one trial.
         intervals = gt_intervals_by_experiment.get(experiment_id, [])
-        ground_truth_room = lookup_ground_truth_room(intervals, effective_time)
+        gt_interval = lookup_ground_truth_interval(intervals, effective_time)
+        ground_truth_room = gt_interval["room"] if gt_interval else None
+        ground_truth_scenario = gt_interval["scenario"] if gt_interval else None
         rows.append({
             "time": doc.get("time"),
             "node_time": doc.get("node_time"),
@@ -245,6 +250,7 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persiste
             "raw_room": doc.get("room"),
             "raw_rssi": doc.get("rssi"),
             "ground_truth_room": ground_truth_room,
+            "ground_truth_scenario": ground_truth_scenario,
             "baseline_room": b_room,
             "baseline_changed": b["changed"],
             "median_room": m_room,
@@ -469,6 +475,9 @@ def main():
     parser.add_argument("--output-dir", default="analysis_output")
     parser.add_argument("--no-plots", action="store_true", help="Gera só os CSVs, sem graficos")
     parser.add_argument("--mongo-uri", default="mongodb://localhost:27017")
+    parser.add_argument("--db-name", default="temp1_db",
+                         help="Nome da base de dados MongoDB (default: temp1_db) - útil para apontar a análise "
+                              "a uma base de dados de teste/staging sem editar o script")
     args = parser.parse_args()
 
     macs = [normalize_mac(m) for m in args.mac] if args.mac else None
@@ -480,7 +489,7 @@ def main():
         os.makedirs(plots_dir, exist_ok=True)
 
     client = MongoClient(args.mongo_uri)
-    db = client["temp1_db"]
+    db = client[args.db_name]
     raw_detections = db["raw_detections"]
     ground_truth = db["ground_truth"]
     experiments = db["experiments"]

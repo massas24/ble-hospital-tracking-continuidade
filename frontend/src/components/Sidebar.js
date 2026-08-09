@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
-import { FaTachometerAlt, FaListAlt, FaShieldAlt, FaSignal, FaMapMarkerAlt } from "react-icons/fa";
+import { FaTachometerAlt, FaListAlt, FaShieldAlt, FaSignal, FaMapMarkerAlt, FaHeartbeat, FaHistory } from "react-icons/fa";
 
 const sidebarStyle = {
   width: "230px",
@@ -123,6 +123,28 @@ export default function Sidebar() {
         >
           <FaSignal size={20} />
           Mirth
+        </Link>
+
+        <Link
+          to="/node-status"
+          style={{
+            ...linkStyle,
+            ...(location.pathname === "/node-status" ? activeStyle : {}),
+          }}
+        >
+          <FaHeartbeat size={20} />
+          Estado dos Nós
+        </Link>
+
+        <Link
+          to="/history"
+          style={{
+            ...linkStyle,
+            ...(location.pathname === "/history" ? activeStyle : {}),
+          }}
+        >
+          <FaHistory size={20} />
+          Histórico
         </Link>
 
         <Link

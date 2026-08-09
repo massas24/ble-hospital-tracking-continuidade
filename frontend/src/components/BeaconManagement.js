@@ -3,6 +3,20 @@
 
 import { useState, useEffect } from 'react'; // React hooks used in the component
 
+// Maps location_status to a Bootstrap badge class + display label (guião
+// secção 3.11 - "indicação de localizações ambíguas" was already computed
+// server-side as location_status, just shown as plain text before).
+const STATUS_BADGES = {
+  confirmada: { className: 'bg-success', label: 'Confirmada' },
+  'em transição': { className: 'bg-warning text-dark', label: 'Em transição' },
+  desconhecida: { className: 'bg-secondary', label: 'Desconhecida' },
+};
+
+function StatusBadge({ status }) {
+  const info = STATUS_BADGES[status] || { className: 'bg-light text-dark', label: status || '-' };
+  return <span className={`badge ${info.className}`}>{info.label}</span>;
+}
+
 export default function BeaconManagement() {
   // State that holds active beacons (latest sightings)
   const [activeBeacons, setActiveBeacons] = useState([]);
@@ -139,6 +153,25 @@ export default function BeaconManagement() {
         </div>
       )}
 
+      {/* Summary strip (guião 3.11 - "número de beacons ativos"). Deliberately
+          excludes location_status "desconhecida" beacons, unlike the table
+          header below: activeBeacons already includes beacons that stopped
+          reporting more than INACTIVE_TIMEOUT_SEC ago (they just get
+          location_status overridden to "desconhecida" in place, not removed
+          from the list) - "beacons currently present" and "rows in this
+          table" are legitimately different questions, so both numbers are
+          kept, with distinct labels. */}
+      {(() => {
+        const present = activeBeacons.filter(b => b.location_status !== 'desconhecida');
+        const emTransicao = present.filter(b => b.location_status === 'em transição').length;
+        return (
+          <div className="mb-3 d-flex gap-4 flex-wrap">
+            <span><strong>{present.length}</strong> beacons presentes agora</span>
+            <span><strong>{emTransicao}</strong> em transição</span>
+          </div>
+        );
+      })()}
+
       {/* Active beacons table */}
       <h3>Active Beacons ({activeBeacons.length})</h3>
       {activeBeacons.length > 0 ? (
@@ -163,7 +196,7 @@ export default function BeaconManagement() {
                   <td>{b.room}</td>
                   <td>{b.rssi}</td>
                   <td>{b.time}</td>
-                  <td>{b.location_status || '-'}</td>
+                  <td><StatusBadge status={b.location_status} /></td>
                   <td>{isSent ? '✓ Sent' : 'Pending'}</td>
                 </tr>
               );

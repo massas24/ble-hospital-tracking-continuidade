@@ -6,6 +6,8 @@ import Devices from "./Devices";
 import AdminPanel from "./AdminPanel";
 import WhitelistAdmin from "./WhitelistAdmin";
 import BeaconManagement from "./BeaconManagement";
+import NodeStatus from "./NodeStatus";
+import DetectionHistory from "./DetectionHistory";
 import RequireAuth from "./RequireAuth";
 
 function DashboardLayout() {
@@ -45,6 +47,22 @@ function DashboardLayout() {
               element={
                 <RequireAuth>
                   <BeaconManagement />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/node-status"
+              element={
+                <RequireAuth>
+                  <NodeStatus />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/history"
+              element={
+                <RequireAuth>
+                  <DetectionHistory />
                 </RequireAuth>
               }
             />

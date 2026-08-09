@@ -1,8 +1,9 @@
 #==============================================================================
 # SECTION 1: IMPORTS AND INITIALIZATION
 #==============================================================================
-# Import Flask core pieces: app creation, access to request body, and JSON helper
-from flask import Flask, request, jsonify  # Flask web framework utilities
+# Import Flask core pieces: app creation, access to request body, JSON
+# helper, and Response (used to build the CSV export's body/headers)
+from flask import Flask, request, jsonify, Response  # Flask web framework utilities
 # Import CORS helper to allow cross-origin requests from the frontend
 from flask_cors import CORS  # Enables Cross-Origin Resource Sharing
 # MongoDB client and index direction constant
@@ -23,6 +24,9 @@ import requests
 import os
 # Generates a unique id per ingestion batch, for raw detection logging
 import uuid
+# Used to build the CSV export response body for /api/detection-history/export
+import csv
+import io
 # Pure median/hysteresis/persistence decision functions, reused here to
 # compute location_status live without touching the existing hysteresis path
 import decision_methods
@@ -43,7 +47,13 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),
 #------------------------------------------------------------------------------
 # Initialize Flask app and enable CORS
 app = Flask(__name__)  # Create Flask application instance
-CORS(app)  # Allow cross-origin requests (used by the React frontend)
+# expose_headers: without this, X-Export-Truncated and Content-Disposition
+# (both set on the CSV export response, see
+# /api/detection-history/export) reach the browser but axios/fetch can't
+# read them from JS in a genuine cross-origin request - the frontend needs
+# X-Export-Truncated to show a truncation warning right after the download,
+# and Content-Disposition to recover the suggested filename.
+CORS(app, expose_headers=["X-Export-Truncated", "Content-Disposition"])  # Allow cross-origin requests (used by the React frontend)
 app.secret_key = "change_this_secret"  # Secret key used by Flask sessions (should be changed)
 
 # Mirth endpoint - override with the MIRTH_URL env var (e.g. for local testing
@@ -55,8 +65,12 @@ MIRTH_URL = os.environ.get("MIRTH_URL", "http://192.168.1.117:6661")
 #==============================================================================
 # Create a MongoDB client pointing to local MongoDB instance
 client = MongoClient("mongodb://localhost:27017")
-# Select (or create) database named temp1_db
-db = client["temp1_db"]
+# Select (or create) the database - override with DB_NAME to point an
+# instance at an isolated database (e.g. temp1_db_verify) without touching
+# real trial data, same pattern already used for MIRTH_URL below. Same
+# local mongod, isolated purely by database name - no second process needed.
+DB_NAME = os.environ.get("DB_NAME", "temp1_db")
+db = client[DB_NAME]
 # Collections used by the app
 admin_users = db["admin_users"]  # Stores admin user credentials and reset tokens
 beacon_history = db["beacon_history"]  # Stores historical beacon sightings (append-only)
@@ -75,12 +89,25 @@ ground_truth = db["ground_truth"]
 # cutoff), one document per experiment_id - distinct from the transient
 # current_experiment_id label, which only stamps raw_detections.
 experiments = db["experiments"]
+# Tiny collection, a single fixed document - durable pointer to the active
+# experiment, so a backend restart mid-trial doesn't silently lose it (see
+# the reload block right after current_experiment_id/
+# current_experiment_started_at are declared below). Not a historical
+# record - that's what `experiments` already is - always overwritten in place.
+app_state = db["app_state"]
 
 # Ensure indexes for performance and uniqueness
 beacon_latest.create_index("mac", unique=True)  # Ensure one document per MAC
 beacon_history.create_index([("mac", ASCENDING), ("time", ASCENDING)])  # Composite index for queries
 raw_detections.create_index([("mac", ASCENDING), ("time", ASCENDING)])  # Composite index for queries
 raw_detections.create_index("batch_id")  # Group all detections from the same ingestion batch
+# Room-only and time-only filters (guião 3.11 "histórico pesquisável" -
+# room/mac/time are each optional) aren't covered by the (mac,time) index
+# above - a mac+room combo still uses that one (mac is more selective).
+raw_detections.create_index([("room", ASCENDING), ("time", ASCENDING)])
+raw_detections.create_index("time")
+# Backs _node_median_rssi's per-esp_id windowed RSSI query (node status panel)
+raw_detections.create_index([("esp_id", ASCENDING), ("time", ASCENDING)])
 ground_truth.create_index([("experiment_id", ASCENDING), ("mac", ASCENDING), ("time", ASCENDING)])
 experiments.create_index("experiment_id", unique=True)
 
@@ -129,9 +156,28 @@ INACTIVE_TIMEOUT_SEC = int(os.environ.get("INACTIVE_TIMEOUT_SEC", "60"))
 _min_rssi_env = os.environ.get("MIN_RSSI", "").strip()
 MIN_RSSI = float(_min_rssi_env) if _min_rssi_env else None
 
+# Rolling window (seconds) used by GET /api/node-status for both
+# detections_per_min and median_rssi_dbm per node - guião secção 3.11,
+# "taxa de deteções por nó". Shared between the two metrics deliberately
+# (no request for separate windows).
+NODE_RATE_WINDOW_SEC = int(os.environ.get("NODE_RATE_WINDOW_SEC", "300"))
+
 # Manually-set label for the experimental trial currently running, stamped
 # onto every raw_detections document until changed via /api/experiment
 current_experiment_id = None
+current_experiment_started_at = None  # mirrors current_experiment_id - in-memory only, for fast reads in GET
+
+# Reloads the active experiment (if any) from Mongo, so a backend restart
+# mid-trial doesn't silently lose it - subsequent detections/taps would
+# otherwise land with experiment_id=None with no warning at all, and the
+# /ground-truth page's live indicator would go from "stale" to actively
+# wrong instead. Runs once at import time, always before app.run() (guarded
+# by if __name__ == "__main__": at the bottom of this file) ever accepts
+# a connection.
+_saved_experiment_state = app_state.find_one({"_id": "current_experiment"})
+if _saved_experiment_state:
+    current_experiment_id = _saved_experiment_state.get("experiment_id")
+    current_experiment_started_at = _saved_experiment_state.get("started_at")
 
 #==============================================================================
 # SECTION 3: AUTHENTICATION MIDDLEWARE
@@ -328,33 +374,164 @@ def _now_str():
     return datetime.now(LOCAL_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _persist_current_experiment():
+    """Durable copy of current_experiment_id/current_experiment_started_at -
+    see the reload block near their declaration. A single document, always
+    overwritten in place (upsert) - never one record per experiment, that's
+    already what the `experiments` collection is for."""
+    app_state.update_one(
+        {"_id": "current_experiment"},
+        {"$set": {"experiment_id": current_experiment_id, "started_at": current_experiment_started_at}},
+        upsert=True,
+    )
+
+
+def _experiment_elapsed_min():
+    """Minutes elapsed since current_experiment_started_at, always computed
+    on the SERVER - never on a client's own clock. The phone and the server
+    are not necessarily the same time reference, and this project has
+    already confirmed the Windows Time service can be stopped on this exact
+    machine (see README, NTP limitations) - a browser-side comparison
+    between its own Date.now() and a server timestamp would not be
+    trustworthy. None when no experiment is active. The one deliberate
+    datetime.strptime in this function, for this one-off arithmetic - same
+    narrow exception already used in metrics.py/_compute_ended_summary, not
+    a wider move away from this file's plain-string-comparison convention."""
+    if not current_experiment_id or not current_experiment_started_at:
+        return None
+    fmt = "%Y-%m-%d %H:%M:%S"
+    elapsed = datetime.strptime(_now_str(), fmt) - datetime.strptime(current_experiment_started_at, fmt)
+    return elapsed.total_seconds() / 60.0
+
+
+def _compute_ended_summary(experiment_id):
+    """Lightweight per-mac breakdown for the experiment_id that was JUST
+    abandoned (previous_experiment_id changing to something else - either
+    an explicit "Terminar ensaio", or a direct overwrite by a new one).
+    Plain pymongo aggregation only - no pandas, no analyze_room_decisions.py
+    import (see the app.py/requirements.txt separation documented at the
+    top of this file). Returns {"experiment_id":, "macs": [...]}, one entry
+    per mac with at least one raw_detections OR ground_truth row for this
+    experiment_id (union of both, so a mac with taps but no detections -
+    or vice versa - still shows up)."""
+    detection_stats = {
+        row["_id"]: row
+        for row in raw_detections.aggregate([
+            {"$match": {"experiment_id": experiment_id}},
+            {"$group": {
+                "_id": "$mac",
+                "num_raw_detections": {"$sum": 1},
+                "first_detection_time": {"$min": "$time"},
+                "last_detection_time": {"$max": "$time"},
+            }},
+        ])
+    }
+    ground_truth_stats = {
+        row["_id"]: row
+        for row in ground_truth.aggregate([
+            {"$match": {"experiment_id": experiment_id}},
+            {"$group": {"_id": "$mac", "num_ground_truth_events": {"$sum": 1}}},
+        ])
+    }
+
+    macs = sorted(set(detection_stats) | set(ground_truth_stats))
+    mac_summaries = []
+    for mac in macs:
+        det = detection_stats.get(mac, {})
+        gt = ground_truth_stats.get(mac, {})
+        num_raw_detections = det.get("num_raw_detections", 0)
+        num_ground_truth_events = gt.get("num_ground_truth_events", 0)
+        first_time = det.get("first_detection_time")
+        last_time = det.get("last_detection_time")
+
+        duration_sec = None
+        if first_time and last_time:
+            # One narrow datetime.strptime, only for this arithmetic - same
+            # deliberate exception metrics.py already uses for elapsed-hours.
+            duration_sec = (
+                datetime.strptime(last_time, "%Y-%m-%d %H:%M:%S")
+                - datetime.strptime(first_time, "%Y-%m-%d %H:%M:%S")
+            ).total_seconds()
+
+        mac_summaries.append({
+            "mac": mac,
+            "num_raw_detections": num_raw_detections,
+            "num_ground_truth_events": num_ground_truth_events,
+            "num_transitions": max(0, num_ground_truth_events - 1),
+            "first_detection_time": first_time,
+            "last_detection_time": last_time,
+            "duration_sec": duration_sec,
+        })
+
+    return {"experiment_id": experiment_id, "macs": mac_summaries}
+
+
 @app.route("/api/experiment", methods=["GET", "POST"])
 @auth_required
 def experiment_api():
-    global current_experiment_id
+    global current_experiment_id, current_experiment_started_at
     if request.method == "POST":
         data = request.json or {}
-        current_experiment_id = data.get("experiment_id") or None
+        previous_experiment_id = current_experiment_id
+        new_experiment_id = data.get("experiment_id") or None
+
+        # Computed BEFORE current_experiment_id is reassigned, using the
+        # trial about to be abandoned. Runs whenever experiment_id changes
+        # to anything else (null OR a different name) - not just an
+        # explicit "Terminar ensaio", also a direct overwrite of an active
+        # trial by a new one (the /ground-truth "Iniciar" overwrite path
+        # never passes through null at all).
+        ended_summary = None
+        if previous_experiment_id and previous_experiment_id != new_experiment_id:
+            ended_summary = _compute_ended_summary(previous_experiment_id)
+
+        current_experiment_id = new_experiment_id
+        is_new_experiment = bool(current_experiment_id) and current_experiment_id != previous_experiment_id
+        if is_new_experiment:
+            current_experiment_started_at = _now_str()
+        elif not current_experiment_id:
+            current_experiment_started_at = None
+        # else: same non-null experiment_id re-affirmed - leave
+        # current_experiment_started_at untouched, so "ativo há X min" keeps
+        # counting from the real start, not from this call.
+
+        _persist_current_experiment()  # durable - survives a backend restart
 
         # Only touch the experiments collection if there is an active
-        # experiment_id AND the request actually carries acquisition fields -
-        # a bare {"experiment_id": "t1"} re-affirmation must never wipe out
-        # acquisition params registered by an earlier call for the same trial.
+        # experiment_id AND (the request carries acquisition fields OR this
+        # is a genuinely new experiment_id) - a bare {"experiment_id": "t1"}
+        # re-affirmation with no new fields and no id change must never
+        # touch it, so it can never wipe out params registered earlier.
         if current_experiment_id:
             update_fields = {
                 field: data[field] for field in ACQUISITION_PARAM_FIELDS if field in data
             }
-            if update_fields:
-                update_fields["updated_at"] = _now_str()
+            if update_fields or is_new_experiment:
+                mongo_update = {"$setOnInsert": {"created_at": _now_str()}}
+                if update_fields:
+                    update_fields["updated_at"] = _now_str()
+                    mongo_update["$set"] = update_fields
                 experiments.update_one(
-                    {"experiment_id": current_experiment_id},
-                    {"$set": update_fields, "$setOnInsert": {"created_at": _now_str()}},
-                    upsert=True,
+                    {"experiment_id": current_experiment_id}, mongo_update, upsert=True,
                 )
 
-        return jsonify({"status": "ok", "experiment_id": current_experiment_id})
-    # On GET return the currently active experiment_id (may be null)
-    return jsonify({"experiment_id": current_experiment_id})
+        response = {
+            "status": "ok",
+            "experiment_id": current_experiment_id,
+            "experiment_started_at": current_experiment_started_at,
+            "experiment_elapsed_min": _experiment_elapsed_min(),
+        }
+        if ended_summary is not None:
+            response["ended_summary"] = ended_summary
+        return jsonify(response)
+
+    # On GET return the currently active experiment_id and when it started
+    # (both may be null)
+    return jsonify({
+        "experiment_id": current_experiment_id,
+        "experiment_started_at": current_experiment_started_at,
+        "experiment_elapsed_min": _experiment_elapsed_min(),
+    })
 
 
 # List all registered trials and their acquisition parameters
@@ -373,6 +550,19 @@ def experiments_view():
 def _ground_truth_doc_to_json(doc):
     doc["id"] = str(doc.pop("_id"))
     return doc
+
+
+# Optional guião scenario tag for a ground-truth tap (guião secção 9) - one
+# of these 4 short codes, chosen over the guião's own Portuguese labels so
+# this field stays stable/ASCII/accent-free for later filtering, matching
+# this project's existing convention of short machine-facing codes (e.g.
+# `mac`, `experiment_id`) over display labels - the frontend's SCENARIOS
+# list is the only place the Portuguese labels are defined. "Vários
+# beacons" (the guião's 5th scenario) is a whole-trial condition, not a
+# per-tap one, and is intentionally not included here. NOT enforced
+# server-side (kept freeform like `note`) - a typo or a future 5th value
+# must never 400 here.
+SCENARIO_VALUES = ("centro_sala", "junto_parede", "junto_porta", "movimento")
 
 
 @app.route("/api/ground-truth", methods=["GET", "POST"])
@@ -407,6 +597,7 @@ def ground_truth_api():
             "room": room,
             "experiment_id": experiment_id,
             "time": time_str,
+            "scenario": (data.get("scenario") or "").strip() or None,
             "note": data.get("note") or None,
         }
         result = ground_truth.insert_one(doc)
@@ -509,11 +700,28 @@ def get_all_beacons():
 # SECTION 8: BLE DATA INGESTION
 #==============================================================================
 # Per-esp_id sequence tracking for missing/duplicate batch detection (guião
-# secção 3) - only in memory, same lifetime as beacon_locations (resets on
-# backend restart). Keyed by esp_id; each value tracks the boot_id of the
-# node's current session, since node_seq restarts at 1 on every firmware
-# boot and would otherwise look like duplicates/gaps across a restart.
-NODE_SEQ_STATE = {}  # {esp_id: {"boot_id": ..., "last_seq": ...}}
+# secção 3), extended to also back the live node-status panel (guião secção
+# 3.11) - only in memory, same lifetime as beacon_locations (resets on
+# backend restart, which is correct here: these are "current session"
+# metrics by design, unlike current_experiment_id which had to survive a
+# restart). Keyed by esp_id:
+#   boot_id, last_seq: node_seq gap/duplicate tracking (as before)
+#   last_seen: "%Y-%m-%d %H:%M:%S" string, updated on every reachable batch
+#   gap_count, duplicate_count, reorder_count: cumulative since backend
+#     start - deliberately NOT reset on a boot_id change (a node rebooting
+#     repeatedly is itself the diagnostic signal worth keeping visible)
+#   recent_batches: [(epoch_float, num_readings), ...] for detections_per_min
+#     - epoch floats via now_dt.timestamp(), not the string convention used
+#     elsewhere, since this is pure in-memory rolling-window arithmetic,
+#     never persisted or compared against Mongo-stored strings
+NODE_SEQ_STATE = {}  # {esp_id: {"boot_id", "last_seq", "last_seen", "gap_count", "duplicate_count", "reorder_count", "recent_batches"}}
+
+# Mirth Connect delivery status (guião secção 2.7/3.11 - "estado da
+# integração com o Mirth Connect"). Today a failed POST to Mirth (below)
+# only ever prints to the backend console - nothing on the dashboard shows
+# it. Not a retry queue (that's guião secção 3.8, a bigger redesign, out of
+# scope here) - just visibility into whether recent sends are succeeding.
+MIRTH_STATUS = {"last_success": None, "last_failure": None, "failure_count_session": 0}
 
 
 def _parse_bledata_payload(payload):
@@ -539,33 +747,84 @@ def _parse_bledata_payload(payload):
     return None, None, None, None, None
 
 
-def _check_node_seq(esp_id, node_seq, boot_id):
-    """Detects missing/duplicate batches per node (guião secção 3) - only
-    prints (same convention as the hysteresis-rejection log below), never
-    blocks ingestion or persists to Mongo. boot_id identifies a continuous
-    running session of the node (node_seq restarts at 0 on every firmware
-    boot) - a boot_id change is never compared as a gap/duplicate, it just
-    resets tracking for the new session. Without boot_id (legacy format, or
-    a missing field) there is no safe way to tell sessions apart, so the
-    check is skipped entirely in that case."""
+def _check_node_seq(esp_id, node_seq, boot_id, now_dt, num_readings):
+    """Detects missing/duplicate/reordered batches per node (guião secção 3)
+    and, since this is called exactly once per batch either way, also
+    updates the liveness/rate state consumed by GET /api/node-status (guião
+    secção 3.11) - last_seen and recent_batches are updated on EVERY
+    reachable path below the top guard, including a node's first-ever batch
+    and its first batch after a reboot (both of which used to hit an early
+    "return" in the node_seq-only version of this function - if only the
+    comparison branch updated liveness, those two cases would leave
+    last_seen stuck one batch behind). node_seq gap/duplicate/reorder
+    counts still only print (same convention as the hysteresis-rejection
+    log below), never block ingestion, but are now also accumulated in
+    gap_count/duplicate_count/reorder_count for the panel. boot_id
+    identifies a continuous running session of the node (node_seq restarts
+    at 0 on every firmware boot) - a boot_id change resets last_seq
+    tracking but deliberately NOT the cumulative counters (see
+    NODE_SEQ_STATE comment above). Without boot_id (legacy format, or a
+    missing field) there is no safe way to tell sessions apart, so
+    everything here - including liveness tracking - is skipped."""
     if not esp_id or node_seq is None or boot_id is None:
         return
     state = NODE_SEQ_STATE.get(esp_id)
-    if state is None or state.get("boot_id") != boot_id:
-        if state is not None:
+    if state is None or state["boot_id"] != boot_id:
+        if state is None:
+            state = NODE_SEQ_STATE[esp_id] = {
+                "gap_count": 0, "duplicate_count": 0, "reorder_count": 0, "recent_batches": [],
+            }
+        else:
             print(f"Info: {esp_id} reiniciou (novo boot_id) - a reiniciar rastreio de node_seq")
-        NODE_SEQ_STATE[esp_id] = {"boot_id": boot_id, "last_seq": node_seq}
-        return
-    last_seq = state["last_seq"]
-    if node_seq == last_seq:
-        print(f"Aviso: lote duplicado de {esp_id} (node_seq={node_seq} repetido)")
-    elif node_seq > last_seq + 1:
-        print(f"Aviso: {node_seq - last_seq - 1} lote(s) em falta de {esp_id} "
-              f"(esperado {last_seq + 1}, recebido {node_seq})")
-    elif node_seq < last_seq:
-        print(f"Aviso: node_seq de {esp_id} recuou dentro da mesma sessão "
-              f"(esperado >={last_seq + 1}, recebido {node_seq}) - inesperado")
-    state["last_seq"] = node_seq
+        state["boot_id"] = boot_id
+        state["last_seq"] = node_seq
+    else:
+        last_seq = state["last_seq"]
+        if node_seq == last_seq:
+            state["duplicate_count"] += 1
+            print(f"Aviso: lote duplicado de {esp_id} (node_seq={node_seq} repetido)")
+        elif node_seq > last_seq + 1:
+            state["gap_count"] += node_seq - last_seq - 1
+            print(f"Aviso: {node_seq - last_seq - 1} lote(s) em falta de {esp_id} "
+                  f"(esperado {last_seq + 1}, recebido {node_seq})")
+        elif node_seq < last_seq:
+            state["reorder_count"] += 1
+            print(f"Aviso: node_seq de {esp_id} recuou dentro da mesma sessão "
+                  f"(esperado >={last_seq + 1}, recebido {node_seq}) - inesperado")
+        state["last_seq"] = node_seq
+
+    state["last_seen"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    state["recent_batches"].append((now_dt.timestamp(), num_readings))
+    cutoff = now_dt.timestamp() - NODE_RATE_WINDOW_SEC
+    state["recent_batches"] = [b for b in state["recent_batches"] if b[0] >= cutoff]
+
+
+def _node_median_rssi(esp_id, now_dt):
+    """Median RSSI (dBm) of whitelisted-beacon detections from this esp_id
+    within NODE_RATE_WINDOW_SEC (same window as detections_per_min, by
+    design - no separate window was requested). This is the metric that
+    actually distinguishes a poorly-positioned/degraded node from a healthy
+    one when both scan at the same rate: in ensaio2, three nodes detected
+    at the same cadence, but ESP-03 saw whitelisted beacons at -80/-92 dBm
+    against -60/-77 dBm from its neighbours at the same instant - a plain
+    detections/min count (which also counts ALL BLE traffic seen per scan,
+    60+ devices per cycle in real data, dominated by ambient noise) would
+    have shown all three nodes as equally healthy. raw_detections only ever
+    contains whitelisted MACs (bledata() only persists those), so no extra
+    whitelist filtering is needed here. Returns None (not a misleading
+    number) when there were no whitelisted detections in the window."""
+    window_start = now_dt.timestamp() - NODE_RATE_WINDOW_SEC
+    window_start_str = datetime.fromtimestamp(window_start, LOCAL_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    docs = raw_detections.find(
+        {"esp_id": esp_id, "time": {"$gte": window_start_str}}, {"rssi": 1}
+    )
+    values = sorted(d["rssi"] for d in docs if isinstance(d.get("rssi"), (int, float)))
+    if not values:
+        return None
+    mid = len(values) // 2
+    if len(values) % 2:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) / 2.0
 
 
 # Endpoint that receives a batch of BLE scans from ESP devices
@@ -591,7 +850,12 @@ def bledata():
 
     # Runs once per POST, before/independent of the per-device loop below -
     # so a valid batch with 0 readings still counts towards the sequence.
-    _check_node_seq(batch_esp_id, node_seq, boot_id)
+    # len(devices) is every BLE device in this scan (any MAC, not just
+    # whitelisted ones) - detections_per_min should reflect whether the
+    # node is scanning normally, not depend on how many test beacons
+    # happen to be nearby right now (that's the beacon-count feature,
+    # deliberately scoped differently).
+    _check_node_seq(batch_esp_id, node_seq, boot_id, now_dt, len(devices))
 
     # Process each reported device
     for device in devices:
@@ -704,6 +968,7 @@ def bledata():
                             timeout=5,
                             headers={'Content-Type': 'application/json'}
                         )
+                        MIRTH_STATUS["last_success"] = now_str
                     except requests.exceptions.RequestException as e:
                         # Log failure but do not fail the whole ingestion.
                         # Plain ASCII prefix on purpose - a "✗" here used to
@@ -712,6 +977,8 @@ def bledata():
                         # with a 500 despite this try/except's whole point
                         # being to swallow Mirth failures without failing.
                         print(f"Aviso: falha ao enviar mudança de localização de {mac} para o Mirth: {str(e)}")
+                        MIRTH_STATUS["last_failure"] = now_str
+                        MIRTH_STATUS["failure_count_session"] += 1
 
                     # Accepted: update stored room/RSSI to the new reading
                     beacon_locations[mac] = {
@@ -776,6 +1043,67 @@ def bledata():
     return jsonify({"status": "success", "received": len(devices)})
 
 #==============================================================================
+# SECTION 8B: NODE TECHNICAL STATUS (guião secção 3.11)
+#==============================================================================
+# Per-node technical status: online/offline (threshold decided client-side,
+# not here - see NodeStatus.js), last communication, detection rate, lost/
+# duplicate/reordered batch counts, RSSI health, and Mirth delivery status.
+# Unions esp_mapping (so a configured node that has NEVER sent anything
+# still shows up as offline, not just absent) with NODE_SEQ_STATE (so a
+# node sending data but not yet mapped to a room shows up with room=None).
+@app.route("/api/node-status", methods=["GET"])
+@auth_required
+def node_status():
+    now_dt = datetime.now(LOCAL_TIMEZONE)
+    rooms_by_esp = {m["esp_id"]: m.get("room") for m in esp_mapping.find({}, {"_id": 0})}
+    all_esp_ids = set(rooms_by_esp.keys()) | set(NODE_SEQ_STATE.keys())
+
+    nodes = []
+    for esp_id in sorted(all_esp_ids):
+        state = NODE_SEQ_STATE.get(esp_id)
+        if state is None:
+            nodes.append({
+                "esp_id": esp_id, "room": rooms_by_esp.get(esp_id), "boot_id": None,
+                "last_seen": None, "seconds_since_last_seen": None,
+                "detections_per_min": 0.0, "median_rssi_dbm": None,
+                "gap_count": 0, "duplicate_count": 0, "reorder_count": 0,
+            })
+            continue
+
+        last_seen_str = state.get("last_seen")
+        seconds_since_last_seen = None
+        if last_seen_str:
+            last_seen_dt = LOCAL_TIMEZONE.localize(datetime.strptime(last_seen_str, "%Y-%m-%d %H:%M:%S"))
+            seconds_since_last_seen = (now_dt - last_seen_dt).total_seconds()
+
+        # Re-filtered at read time (not just relying on the write-time trim
+        # in _check_node_seq) - a node that went silent must show its rate
+        # decaying towards 0 here, not keep reporting whatever was last
+        # computed when it was still sending.
+        cutoff = now_dt.timestamp() - NODE_RATE_WINDOW_SEC
+        recent = [b for b in state.get("recent_batches", []) if b[0] >= cutoff]
+        detections_per_min = sum(n for _, n in recent) / (NODE_RATE_WINDOW_SEC / 60.0)
+
+        nodes.append({
+            "esp_id": esp_id,
+            "room": rooms_by_esp.get(esp_id),
+            "boot_id": state.get("boot_id"),
+            "last_seen": last_seen_str,
+            "seconds_since_last_seen": seconds_since_last_seen,
+            "detections_per_min": round(detections_per_min, 2),
+            "median_rssi_dbm": _node_median_rssi(esp_id, now_dt),
+            "gap_count": state.get("gap_count", 0),
+            "duplicate_count": state.get("duplicate_count", 0),
+            "reorder_count": state.get("reorder_count", 0),
+        })
+
+    return jsonify({
+        "nodes": nodes,
+        "rate_window_sec": NODE_RATE_WINDOW_SEC,
+        "mirth": MIRTH_STATUS,
+    })
+
+#==============================================================================
 # SECTION 9: SEND ACTIVE BEACONS TO MIRTH (MANUAL)
 #==============================================================================
 # Manual endpoint to push all currently active beacons to Mirth at once
@@ -831,8 +1159,109 @@ def send_active_beacons_to_mirth():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 #==============================================================================
+# SECTION 9B: SEARCHABLE DETECTION HISTORY + CSV EXPORT (guião secção 3.11)
+#==============================================================================
+def _build_detection_history_query(args):
+    """Mongo filter for /api/detection-history and its /export twin, from
+    optional room/mac/start/end query params (guião: "filtros por sala,
+    beacon e intervalo temporal" - each independently optional, so any
+    subset - including none - is valid). mac normalization matches every
+    other mac-accepting route in this file. Returns (query, error_message);
+    error_message is None on success - on failure the caller should return
+    400 rather than silently ignoring a malformed value (same convention
+    ground_truth_api already uses for its own time field)."""
+    query = {}
+    room = (args.get("room") or "").strip()
+    if room:
+        query["room"] = room
+    mac = (args.get("mac") or "").strip()
+    if mac:
+        query["mac"] = mac.replace("-", ":").lower().strip().replace('"', "")
+    time_filter = {}
+    for param, op in (("start", "$gte"), ("end", "$lte")):
+        value = (args.get(param) or "").strip()
+        if not value:
+            continue
+        try:
+            datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None, f"{param} inválido, esperado YYYY-MM-DD HH:MM:SS"
+        time_filter[op] = value
+    if time_filter:
+        query["time"] = time_filter
+    return query, None
+
+
+def _parse_limit(args, default, cap):
+    """Returns None on a non-numeric limit (caller returns 400) instead of
+    letting int() raise ValueError uncaught, which used to surface as an
+    unrelated 500 - the same 400-on-bad-input treatment start/end already
+    get in _build_detection_history_query above."""
+    raw = args.get("limit", str(default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return min(max(value, 1), cap)
+
+
+# Scoped for filtered, ad-hoc look-ups from the dashboard - not a bulk-
+# export replacement for analyze_room_decisions.py, which remains the way
+# to pull a whole trial's data for offline analysis.
+@app.route("/api/detection-history", methods=["GET"])
+@auth_required
+def detection_history():
+    query, error = _build_detection_history_query(request.args)
+    if error:
+        return jsonify({"error": error}), 400
+    limit = _parse_limit(request.args, default=500, cap=5000)
+    if limit is None:
+        return jsonify({"error": "limit inválido"}), 400
+    # Fetch one extra row to detect truncation without a separate count query
+    docs = list(raw_detections.find(query, {"_id": 0}).sort("time", -1).limit(limit + 1))
+    truncated = len(docs) > limit
+    return jsonify({"results": docs[:limit], "truncated": truncated})
+
+
+EXPORT_ROW_LIMIT = 5000
+
+@app.route("/api/detection-history/export", methods=["GET"])
+@auth_required
+def detection_history_export():
+    query, error = _build_detection_history_query(request.args)
+    if error:
+        return jsonify({"error": error}), 400
+    docs = list(raw_detections.find(query, {"_id": 0}).sort("time", -1).limit(EXPORT_ROW_LIMIT + 1))
+    truncated = len(docs) > EXPORT_ROW_LIMIT
+    docs = docs[:EXPORT_ROW_LIMIT]
+    # Explicit column list (not "whatever keys the first doc has") so the
+    # header is always written, even for a filter matching 0 rows - same
+    # empty-header guard analyze_room_decisions.py already uses.
+    columns = ["time", "mac", "room", "esp_id", "rssi", "node_time", "node_seq", "boot_id", "batch_id", "experiment_id"]
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    for doc in docs:
+        writer.writerow(doc)
+    stamp = datetime.now(LOCAL_TIMEZONE).strftime("%Y%m%d_%H%M%S")  # no ":" - invalid in Windows filenames
+    # Truncation is signalled twice, deliberately never inside the CSV data
+    # rows themselves (an extra note row mixed into tabular data is easy to
+    # miss and would silently pollute a later pandas/Excel analysis):
+    # the X-Export-Truncated header (read by the frontend right after the
+    # download, see DetectionHistory.js) and a filename suffix, so the
+    # signal survives even outside the app (opened later, shared with
+    # someone else).
+    filename = f"deteccoes_{stamp}{'_truncated' if truncated else ''}.csv"
+    return Response(output.getvalue(), mimetype="text/csv", headers={
+        "Content-Disposition": f"attachment; filename={filename}",
+        "X-Export-Truncated": "true" if truncated else "false",
+    })
+
+#==============================================================================
 # SECTION 10: APPLICATION ENTRY POINT
 #==============================================================================
-# Run the Flask app when the file is executed directly
+# Run the Flask app when the file is executed directly - PORT override lets
+# an isolated verification instance run alongside the real one (port 5000)
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    PORT = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=PORT, debug=False)
