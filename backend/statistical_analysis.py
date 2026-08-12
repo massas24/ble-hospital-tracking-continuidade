@@ -63,6 +63,16 @@ WILCOXON_PAIRS = list(itertools.combinations(METHODS, 2))  # 6 pares, ordem fixa
 METRICS_TESTED = ["accuracy", "false_movements_per_hour", "latency_median_sec"]
 PER_TRANSITION_METRICS_TESTED = ["latency_sec"]  # accuracy/false_movements_per_hour não têm unidade por-transição; detected fica só descritivo (ver detection_rate_summary)
 
+# Superset de METRICS_TESTED, só para estatística descritiva (média/IC),
+# usado pelas figuras/tabela do capítulo de resultados (backend/
+# generate_report_figures.py) que precisam de mais colunas do que as 3
+# testadas para significância - ex. a tabela global (figura 1 do guião)
+# tem 6 colunas, não 3. NUNCA usado pelos testes pareados/Bonferroni
+# abaixo - build_repetition_wilcoxon_rows/build_repetition_friedman_rows
+# continuam a iterar só METRICS_TESTED, para a família de hipóteses
+# (REPETITION_BONFERRONI_M_*) nunca mudar silenciosamente por causa disto.
+DESCRIPTIVE_METRICS = METRICS_TESTED + ["latency_p95_sec", "missed_movement_rate", "pct_time_unknown_or_transition"]
+
 DEFAULT_ALPHA = 0.05
 
 # m fixo por família de hipóteses (nº de pares x nº de métricas testadas em
@@ -74,7 +84,7 @@ REPETITION_BONFERRONI_M_FRIEDMAN = len(METRICS_TESTED)                          
 TRANSITION_BONFERRONI_M_WILCOXON = len(WILCOXON_PAIRS) * len(PER_TRANSITION_METRICS_TESTED)  # 6
 TRANSITION_BONFERRONI_M_FRIEDMAN = len(PER_TRANSITION_METRICS_TESTED)                      # 1
 
-REQUIRED_SUMMARY_COLUMNS = ["mac", "method", "accuracy", "false_movements_per_hour", "latency_median_sec"]
+REQUIRED_SUMMARY_COLUMNS = ["mac", "method"] + DESCRIPTIVE_METRICS
 REQUIRED_DETAIL_COLUMNS = ["mac", "experiment_id", "time", "ground_truth_room"] + [f"{m}_room" for m in METHODS]
 
 RAW_VALUES_COLUMNS = ["mac", "method", "metric", "repetition_label", "value"]
@@ -325,6 +335,89 @@ def load_repetition_summaries(paths):
     return records_by_label
 
 
+def check_consistent_analysis_parameters(csv_paths, prefix="decision_summary_", ignore_keys=None):
+    """Compares analysis_parameters (median_window/hysteresis_margin/
+    persistence_streak/min_rssi) across the run_metadata_<label>.json
+    sibling of each input path - motivated by a real finding, not
+    hypothetical: this project's own ensaio1/ensaio2 were analyzed with
+    median_window=5 vs 15 and were nearly pooled as "repetitions" without
+    anyone noticing. Returns a list of human-readable warnings (empty =
+    consistent) - never raises, callers decide whether to hard-fail or
+    print-and-continue. `prefix` matches whichever of analyze_room_
+    decisions.py's per-label outputs is being checked (default
+    "decision_summary_"; pass "raw_with_decisions_" for detail CSVs, e.g.
+    generate_report_figures.py's scenario-table). ignore_keys excludes a
+    key from comparison, for sweep_parameter.py to allow the ONE parameter
+    it's deliberately varying to differ across the sweep's own per-point
+    repetitions. Sibling files that can't be located are silently skipped
+    (best-effort check, not a hard requirement on file layout)."""
+    ignore_keys = set(ignore_keys or [])
+    params_by_path = {}
+    for path in csv_paths:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if not stem.startswith(prefix):
+            continue
+        run_label = stem[len(prefix):]
+        metadata_path = os.path.join(os.path.dirname(path), f"run_metadata_{run_label}.json")
+        if not os.path.exists(metadata_path):
+            continue
+        with open(metadata_path, encoding="utf-8") as f:
+            metadata = json.load(f)
+        params_by_path[path] = {
+            k: v for k, v in metadata.get("analysis_parameters", {}).items() if k not in ignore_keys
+        }
+
+    warnings = []
+    reference_path, reference_params = None, None
+    for path, params in params_by_path.items():
+        if reference_params is None:
+            reference_path, reference_params = path, params
+            continue
+        if params != reference_params:
+            warnings.append(
+                f"Parâmetros de análise inconsistentes: {os.path.basename(reference_path)} "
+                f"tem {reference_params}, {os.path.basename(path)} tem {params} - "
+                "estas repetições não são comparáveis."
+            )
+    return warnings
+
+
+def check_room_consistency(confusion_csv_paths):
+    """Compares the set of real_room values across confusion_matrix_<label>.csv
+    files about to be pooled (figure 6's --pool path in
+    generate_report_figures.py) - motivated by a real finding, not a
+    hypothetical: this project's own ensaio1/ensaio2 only share "Sala dos
+    brinquedos", so summing their confusion matrices as-is would produce a
+    0-count row for any room never tested in one of the two repetitions,
+    visually indistinguishable from "tested extensively, zero confusion".
+    Returns a list of human-readable warnings (empty = consistent)."""
+    rooms_by_path = {}
+    for path in confusion_csv_paths:
+        df = pd.read_csv(path)
+        rooms_by_path[path] = set(df["real_room"].dropna().unique())
+
+    all_rooms = set()
+    common_rooms = None
+    for rooms in rooms_by_path.values():
+        all_rooms |= rooms
+        common_rooms = rooms if common_rooms is None else (common_rooms & rooms)
+    common_rooms = common_rooms or set()
+
+    only_in_some = all_rooms - common_rooms
+    if not only_in_some:
+        return []
+    details = []
+    for room in sorted(only_in_some):
+        present_in = [os.path.basename(p) for p, rooms in rooms_by_path.items() if room in rooms]
+        details.append(f"{room!r} só em {present_in}")
+    return [
+        "Salas reais não são as mesmas em todas as repetições - somar as "
+        "matrizes de confusão vai gerar linhas com 0 deteções para salas "
+        "nunca testadas nessa repetição, indistinguível de 'testada, sem "
+        "confusão': " + "; ".join(details)
+    ]
+
+
 def build_repetition_table(records_by_label, mac, metric):
     """{método: {repetition_label: valor|None}} - pivot único de que tudo
     o resto parte. "mac não estava nesta repetição" e "mac sem ground
@@ -367,7 +460,7 @@ def build_repetition_raw_value_rows(records_by_label, macs):
     rows = []
     for mac in macs:
         for method in METHODS:
-            for metric in METRICS_TESTED:
+            for metric in DESCRIPTIVE_METRICS:
                 table = build_repetition_table(records_by_label, mac, metric)
                 for label in sorted(table[method]):
                     rows.append({
@@ -381,7 +474,7 @@ def build_repetition_descriptive_rows(records_by_label, macs):
     rows = []
     for mac in macs:
         for method in METHODS:
-            for metric in METRICS_TESTED:
+            for metric in DESCRIPTIVE_METRICS:
                 table = build_repetition_table(records_by_label, mac, metric)
                 labels_used = sorted(l for l, v in table[method].items() if v is not None)
                 values = [table[method][l] for l in labels_used]

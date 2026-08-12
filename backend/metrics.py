@@ -11,7 +11,7 @@ datetime.strptime is used narrowly here for those two computations only.
 """
 
 import statistics
-from datetime import datetime
+from datetime import datetime, timedelta
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -157,12 +157,16 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
     """rows: full chronological list for ONE (mac, method), each with
     {"time", "experiment_id", "ground_truth_room", "estimated_room", "changed"}.
 
-    Returns the 12 summary columns. pct_time_unknown_or_transition is
-    always computed (it only depends on the method's own decided_room
-    being None, not on ground truth). If NO row has ground truth coverage,
-    every other field is None ("unmeasurable", distinct from a genuine
-    zero - e.g. false_movements_per_hour=0.0 would misleadingly read as
-    "measured zero false movements").
+    Returns the 12 summary columns plus "transition_details" (a list, see
+    below - callers building a decision_summary row must pop it first, it
+    isn't one of the 12 scalar columns that CSV has always had).
+    pct_time_unknown_or_transition is always computed (it only depends on
+    the method's own decided_room being None, not on ground truth). If NO
+    row has ground truth coverage, every other field is None
+    ("unmeasurable", distinct from a genuine zero - e.g.
+    false_movements_per_hour=0.0 would misleadingly read as "measured zero
+    false movements") and transition_details is an empty list (consistent
+    shape in both branches, never a missing key).
 
     "All experiments" mode (--experiment-id omitted) can interleave one
     mac's rows across several unrelated trials - transitions/latency/
@@ -192,6 +196,7 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
             "latency_min_sec": None,
             "latency_max_sec": None,
             "pct_time_unknown_or_transition": pct_time_unknown_or_transition,
+            "transition_details": [],
         }
 
     accuracy = sum(1 for r in gt_rows if r["estimated_room"] == r["ground_truth_room"]) / len(gt_rows)
@@ -205,6 +210,7 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
     num_missed = 0
     all_latencies = []
     total_hours = 0.0
+    transition_details = []
 
     for experiment_id, exp_rows in by_experiment.items():
         intervals = gt_intervals_by_experiment.get(experiment_id, [])
@@ -212,11 +218,22 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
             transitions = extract_true_transitions(intervals)
             detections = match_transitions_to_detections(transitions, exp_rows)
             num_true_movements += len(transitions)
-            for d in detections:
+            for transition_index, (t, d) in enumerate(zip(transitions, detections)):
                 if d["detected"]:
                     all_latencies.append(d["latency_sec"])
+                    confirmation_time = (_parse(t["time"]) + timedelta(seconds=d["latency_sec"])).strftime(TIME_FORMAT)
                 else:
                     num_missed += 1
+                    confirmation_time = None
+                transition_details.append({
+                    "experiment_id": experiment_id,
+                    "transition_index": transition_index,
+                    "new_room": t["new_room"],
+                    "transition_time": t["time"],
+                    "detected": d["detected"],
+                    "latency_sec": d["latency_sec"],
+                    "confirmation_time": confirmation_time,
+                })
         if exp_rows:
             elapsed_hours = (_parse(exp_rows[-1]["time"]) - _parse(exp_rows[0]["time"])).total_seconds() / 3600.0
             total_hours += elapsed_hours
@@ -238,4 +255,13 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
         "latency_min_sec": latency_summary["min"],
         "latency_max_sec": latency_summary["max"],
         "pct_time_unknown_or_transition": pct_time_unknown_or_transition,
+        # Per-transition detail (real Mongo-sourced transition instant +
+        # each method's confirmation instant, not reconstructed from a CSV
+        # column change) - consumed by analyze_room_decisions.build_summary_rows
+        # to write transition_latencies_<label>.csv, then by
+        # generate_report_figures.py's latency-boxplot and rssi-timeline
+        # figures. Callers that only want the decision_summary row MUST pop
+        # this key first (see build_summary_rows) - it isn't one of the 12
+        # scalar columns that CSV has always had.
+        "transition_details": transition_details,
     }

@@ -282,6 +282,14 @@ def reset_password():
     data = request.json
     token = data.get("token")
     new_password = data.get("password")
+    # token must be a real, non-empty string before it ever reaches a Mongo
+    # query - without this check, a body like {"token": {"$ne": null}} would
+    # match ANY admin with a still-pending (never completed) reset request,
+    # bypassing the token entirely (NoSQL injection via operator injection).
+    if not isinstance(token, str) or not token:
+        return jsonify({"error": "Invalid or expired token"}), 400
+    if not isinstance(new_password, str) or not new_password:
+        return jsonify({"error": "Password is required"}), 400
     user = admin_users.find_one({"reset_token": token})  # Find user by token
     # Validate token presence and expiry
     if not user or "reset_expiry" not in user or user["reset_expiry"] < datetime.utcnow():
@@ -735,7 +743,15 @@ def _parse_bledata_payload(payload):
     if isinstance(payload, list):
         return payload, None, None, None, None
     if isinstance(payload, dict) and isinstance(payload.get("readings"), list):
-        batch_esp_id = payload.get("esp_id") or ""
+        batch_esp_id = payload.get("esp_id")
+        # Must be a plain string - it's used as a NODE_SEQ_STATE dict key in
+        # _check_node_seq (a non-hashable value like a dict would crash
+        # that lookup) and as the esp_mapping query value for any reading
+        # that doesn't set its own esp_id (see below) - same NoSQL
+        # injection concern as the per-device esp_id sanitization in
+        # bledata() itself.
+        if not isinstance(batch_esp_id, str):
+            batch_esp_id = ""
         devices = [dict(r, esp_id=r.get("esp_id") or batch_esp_id) for r in payload["readings"]]
         node_seq = payload.get("node_seq")
         if not isinstance(node_seq, int):
@@ -863,6 +879,18 @@ def bledata():
         mac = device["mac"].replace("-", ":").lower().strip().replace('"', '')
         device["mac"] = mac
         device["time"] = now_str  # Add timestamp
+
+        # esp_id must be a plain string before it's ever used to build a
+        # Mongo query (the mapping lookup right below) - otherwise a JSON
+        # body like {"esp_id": {"$ne": null}} would be interpreted as a
+        # query operator instead of a literal value (NoSQL injection),
+        # matching an arbitrary esp_mapping document instead of matching
+        # none. Coerced once here so every later device.get("esp_id", "")
+        # in this function reads the already-sanitized value.
+        esp_id = device.get("esp_id", "")
+        if not isinstance(esp_id, str):
+            esp_id = ""
+        device["esp_id"] = esp_id
 
         # Map esp_id to a room name, default to 'unknown'
         mapping = esp_mapping.find_one({"esp_id": device.get("esp_id", "")})

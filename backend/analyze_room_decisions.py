@@ -288,7 +288,15 @@ def _records_with_none(df):
 
 
 def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
+    """Returns (summary_rows, transition_latency_rows). transition_latency_rows
+    is real-Mongo-sourced per-transition detail (transition instant + each
+    method's confirmation instant, never reconstructed from a CSV column
+    change - no BASELINE_LATENCY_CAVEAT-style artifact), popped out of
+    metrics.compute_ground_truth_metrics's return dict before it's spread
+    into a summary row - decision_summary_<label>.csv's columns are
+    unaffected by this."""
     summary_rows = []
+    transition_latency_rows = []
 
     final_room_col = next(rc for name, rc, _ in METHODS if name == FINAL_METHOD)
     final_rooms = detail_df[final_room_col]
@@ -335,6 +343,12 @@ def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
         gt_metrics = metrics.compute_ground_truth_metrics(
             _records_with_none(method_rows), gt_intervals_by_experiment, first_decision_index
         )
+        # Must be popped BEFORE gt_metrics is spread into the summary row
+        # below - otherwise decision_summary_<label>.csv would gain a
+        # column holding a serialized list instead of a scalar.
+        transition_details = gt_metrics.pop("transition_details", [])
+        for detail in transition_details:
+            transition_latency_rows.append({"mac": mac, "method": method, **detail})
 
         summary_rows.append({
             "mac": mac,
@@ -347,7 +361,7 @@ def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
             **gt_metrics,
         })
 
-    return summary_rows
+    return summary_rows, transition_latency_rows
 
 
 def build_confusion_rows(mac, detail_df):
@@ -513,6 +527,7 @@ def main():
 
     all_detail_frames = []
     all_summary_rows = []
+    all_transition_latency_rows = []
     all_confusion_rows = []
     ground_truth_summary = {}
     node_time_summary = {}
@@ -531,7 +546,9 @@ def main():
             gt_intervals_by_experiment,
         )
         all_detail_frames.append(detail_df)
-        all_summary_rows.extend(build_summary_rows(mac, detail_df, gt_intervals_by_experiment))
+        summary_rows, transition_latency_rows = build_summary_rows(mac, detail_df, gt_intervals_by_experiment)
+        all_summary_rows.extend(summary_rows)
+        all_transition_latency_rows.extend(transition_latency_rows)
         all_confusion_rows.extend(build_confusion_rows(mac, detail_df))
 
         ground_truth_summary[mac] = {
@@ -561,6 +578,7 @@ def main():
     detail_csv = os.path.join(args.output_dir, f"raw_with_decisions_{label}.csv")
     summary_csv = os.path.join(args.output_dir, f"decision_summary_{label}.csv")
     confusion_csv = os.path.join(args.output_dir, f"confusion_matrix_{label}.csv")
+    transition_latencies_csv = os.path.join(args.output_dir, f"transition_latencies_{label}.csv")
     metadata_json = os.path.join(args.output_dir, f"run_metadata_{label}.json")
 
     combined_detail.to_csv(detail_csv, index=False)
@@ -572,6 +590,16 @@ def main():
     pd.DataFrame(
         all_confusion_rows, columns=["mac", "method", "real_room", "estimated_room", "count"]
     ).to_csv(confusion_csv, index=False)
+    # Real Mongo-sourced per-transition latencies (transition instant + each
+    # method's confirmation instant), consumed by generate_report_figures.py's
+    # latency-boxplot and rssi-timeline figures - never reconstructed from a
+    # CSV column change, so free of the baseline-artifact caveat that
+    # statistical_analysis.py's --pertransition mode has to carry.
+    pd.DataFrame(
+        all_transition_latency_rows,
+        columns=["mac", "method", "experiment_id", "transition_index", "new_room",
+                 "transition_time", "detected", "latency_sec", "confirmation_time"],
+    ).to_csv(transition_latencies_csv, index=False)
 
     # Acquisition parameters (scan duration/interval, firmware RSSI cutoff)
     # were registered separately per experiment_id via POST /api/experiment,
@@ -628,6 +656,7 @@ def main():
     print(f"\nCSV de detalhe: {detail_csv}")
     print(f"CSV de resumo: {summary_csv}")
     print(f"Matriz de confusão: {confusion_csv}")
+    print(f"Latências por transição: {transition_latencies_csv}")
     print(f"Metadados do ensaio/análise: {metadata_json}")
 
 
