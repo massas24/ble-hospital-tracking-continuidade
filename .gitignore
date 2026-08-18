@@ -25,6 +25,8 @@ yarn-error.log*
 # Generated analysis output (not source - see backend/analyze_room_decisions.py)
 /backend/analysis_output/
 /backend/plots/
+/backend/sweep_output/
+/backend/report_figures/
 
 # Python
 __pycache__/

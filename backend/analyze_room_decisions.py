@@ -428,6 +428,104 @@ def compute_node_seq_gaps(seqs_by_esp_boot):
     return result
 
 
+def load_acquisition_config_by_esp(collection, experiment_id):
+    """{(experiment_id, esp_id): {"scan_duration_sec": {valores...}, "upload_interval_ms": {valores...}}}
+    - conjunto de valores efetivos DISTINTOS observados em raw_detections
+    (guião secção 7), por esp_id, dentro de cada experiment_id. Linhas sem
+    nenhum dos dois campos (dados anteriores a esta funcionalidade, ou
+    formato antigo) ficam simplesmente ausentes dos conjuntos - não tratadas
+    como um terceiro valor "desconhecido"."""
+    query = {"$or": [{"scan_duration_sec": {"$ne": None}}, {"upload_interval_ms": {"$ne": None}}]}
+    if experiment_id is not None:
+        query["experiment_id"] = experiment_id
+    docs = collection.find(
+        query, {"esp_id": 1, "experiment_id": 1, "scan_duration_sec": 1, "upload_interval_ms": 1}
+    )
+    result = {}
+    for doc in docs:
+        key = (doc.get("experiment_id"), doc.get("esp_id"))
+        entry = result.setdefault(key, {"scan_duration_sec": set(), "upload_interval_ms": set()})
+        if doc.get("scan_duration_sec") is not None:
+            entry["scan_duration_sec"].add(doc["scan_duration_sec"])
+        if doc.get("upload_interval_ms") is not None:
+            entry["upload_interval_ms"].add(doc["upload_interval_ms"])
+    return result
+
+
+def compute_acquisition_config_divergence(config_by_esp, acquisition_by_experiment):
+    """Duas verificações independentes, por (experiment_id, campo) em
+    scan_duration_sec/upload_interval_ms:
+
+    (a) Consistência interna por esp_id: mais do que um valor efetivo
+        distinto para o MESMO esp_id dentro do MESMO experiment_id nunca
+        pode ser intencional (é o mesmo nó físico, no mesmo ensaio) -
+        sinalizado sempre que acontece.
+    (b) Frota vs. registado: só é comparável quando TODOS os esp_id que
+        contribuíram um valor limpo (exatamente 1 valor observado) nesse
+        experiment_id concordam entre si (frota homogénea). Comparar um
+        único valor registado em `experiments` contra uma frota
+        deliberadamente heterogénea (configuração por esp_id a ser usada
+        para dar valores diferentes a nós diferentes) acusaria falsamente o
+        nó cujo valor é, por desenho, diferente dos outros - por isso, nesse
+        caso, esta função não compara com o registado, devolve só a
+        distribuição por esp_id como informação.
+
+    Devolve {experiment_id: {"warnings": [frase citável, ...], "fleet":
+    {campo: {"homogeneous", "effective_value", "registered_value",
+    "diverges_from_registered", "by_esp_id"}}}} - um registo por
+    experiment_id com alguns dados de configuração em raw_detections;
+    inteiramente {} quando esta corrida não tem nenhum (ex: dados anteriores
+    à funcionalidade)."""
+    by_experiment = {}
+    for (experiment_id, esp_id), field_sets in config_by_esp.items():
+        by_experiment.setdefault(experiment_id, {})[esp_id] = field_sets
+
+    result = {}
+    for experiment_id, per_esp in by_experiment.items():
+        warnings = []
+        fleet = {}
+        registered = acquisition_by_experiment.get(experiment_id) or {}
+
+        for field in ("scan_duration_sec", "upload_interval_ms"):
+            clean_values_by_esp = {}
+            for esp_id, field_sets in per_esp.items():
+                values = sorted(field_sets.get(field, set()))
+                if len(values) > 1:
+                    warnings.append(
+                        f"{esp_id} usou {len(values)} valores distintos de {field} dentro do "
+                        f"ensaio '{experiment_id}': {values} - o mesmo nó nunca deveria divergir "
+                        f"de si próprio dentro de um único ensaio."
+                    )
+                elif len(values) == 1:
+                    clean_values_by_esp[esp_id] = values[0]
+
+            distinct_clean = sorted(set(clean_values_by_esp.values()))
+            homogeneous = len(distinct_clean) <= 1
+            effective_value = distinct_clean[0] if homogeneous and distinct_clean else None
+            registered_value = registered.get(field)
+            diverges_from_registered = (
+                homogeneous and effective_value is not None and registered_value is not None
+                and effective_value != registered_value
+            )
+            if diverges_from_registered:
+                warnings.append(
+                    f"Ensaio '{experiment_id}': {field} registado em experiments "
+                    f"({registered_value}) diverge do valor efetivo observado em todos os nós "
+                    f"({effective_value})."
+                )
+            fleet[field] = {
+                "homogeneous": homogeneous,
+                "effective_value": effective_value,
+                "registered_value": registered_value,
+                "diverges_from_registered": diverges_from_registered,
+                "by_esp_id": clean_values_by_esp,
+            }
+
+        result[experiment_id] = {"warnings": warnings, "fleet": fleet}
+
+    return result
+
+
 def plot_mac(mac, detail_df, output_dir, label):
     x = list(range(len(detail_df)))
 
@@ -620,6 +718,15 @@ def main():
     # live, console-only check in app.py with citable numbers here.
     node_seq_gap_summary = compute_node_seq_gaps(load_node_seq_by_esp(raw_detections, args.experiment_id))
 
+    # Guião secção 7: acquisition config (scan_duration_sec/upload_interval_ms)
+    # divergence, both within a node across the same trial and between the
+    # fleet's effective config and what was registered in `experiments` - see
+    # compute_acquisition_config_divergence's docstring for why these are two
+    # separate checks, not one.
+    acquisition_config_divergence = compute_acquisition_config_divergence(
+        load_acquisition_config_by_esp(raw_detections, args.experiment_id), acquisition_by_experiment,
+    )
+
     # See NODE_TIME_CLOCK_WARNING's own comment - this stays None (no
     # warning at all) unless at least one processed group actually used
     # clock_source="node".
@@ -649,6 +756,7 @@ def main():
         "node_time_summary": node_time_summary,
         "node_seq_gap_summary": node_seq_gap_summary,
         "node_time_clock_warning": node_time_clock_warning,
+        "acquisition_config_divergence": acquisition_config_divergence,
     }
     with open(metadata_json, "w", encoding="utf-8") as f:
         json.dump(run_metadata, f, indent=2, ensure_ascii=False, default=str)

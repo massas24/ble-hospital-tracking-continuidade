@@ -58,7 +58,7 @@ app.secret_key = "change_this_secret"  # Secret key used by Flask sessions (shou
 
 # Mirth endpoint - override with the MIRTH_URL env var (e.g. for local testing
 # against mock_mirth.py); defaults to the real production Mirth server
-MIRTH_URL = os.environ.get("MIRTH_URL", "http://192.168.1.117:6661")
+MIRTH_URL = os.environ.get("MIRTH_URL", "http://localhost:6661")
 
 #==============================================================================
 # SECTION 2: DATABASE CONFIGURATION
@@ -337,20 +337,93 @@ def delete_whitelist(mac):
 #==============================================================================
 # SECTION 6: ESP ROOM MAPPING MANAGEMENT
 #==============================================================================
-# Manage mapping between ESP devices and human-readable room names
+# Per-esp_id acquisition config override (guião secção 7 - the last
+# previously-compiled-in parameter: SCAN_DURATION_SEC/UPLOAD_INTERVAL_MS).
+# Stored on the SAME esp_mapping document as room (esp_mapping is already
+# keyed by esp_id - a second collection would be more work for less
+# flexibility), but room and acquisition config remain independent concerns:
+# a node can have either, both, or neither set at a given time. Falls back
+# to these env-configurable defaults - the same values the firmware has
+# compiled in today (5s / 10000ms) - whenever a given esp_id has no
+# override for a field.
+DEFAULT_SCAN_DURATION_SEC = int(os.environ.get("DEFAULT_SCAN_DURATION_SEC", "5"))
+DEFAULT_UPLOAD_INTERVAL_MS = int(os.environ.get("DEFAULT_UPLOAD_INTERVAL_MS", "10000"))
+ACQUISITION_CONFIG_FIELDS = ("scan_duration_sec", "upload_interval_ms")
+
+
+def _validate_positive_int(value, field_name):
+    """Rejects anything but a genuine positive int - bool excluded
+    explicitly, since isinstance(True, int) is True in Python and would
+    otherwise let a config value of true/false silently become 1/0 instead
+    of a 400. No upper bound on purpose (see remote-config plan's "Revisão
+    de âmbito"): the researcher is physically present during trials, and an
+    absurdly large value is immediately visible in the Monitor Série and the
+    upload cadence, rather than needing an invented ceiling here. Returns an
+    error string, or None when value is absent or valid."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return f"{field_name} deve ser um número inteiro positivo"
+    return None
+
+
+# Manage mapping between ESP devices and human-readable room names, plus the
+# optional per-esp_id acquisition config override above.
 @app.route("/api/esp-mapping", methods=["GET", "POST"])
 @auth_required
 def esp_mapping_api():
     if request.method == "POST":
-        data = request.json
+        data = request.json or {}
         esp_id = data.get("esp_id")
         room = data.get("room")
-        # Validate input
-        if not esp_id or not room:
+        existing = esp_mapping.find_one({"esp_id": esp_id}) if esp_id else None
+
+        # room is only required the first time an esp_id is registered - a
+        # later POST can update just this node's acquisition config without
+        # resending its already-known room (avoids forcing a room value into
+        # requests that only exist to change scan_duration_sec/
+        # upload_interval_ms). A brand-new esp_id with no room anywhere,
+        # config-only, is rejected here rather than silently creating a
+        # room-less mapping doc - a node whose mapping is missing "room"
+        # entirely would otherwise only surface as a bug the next time
+        # bledata() looked it up.
+        if not esp_id or (not room and not (existing and existing.get("room"))):
             return jsonify({"error": "Missing fields"}), 400
+
+        config_fields = {}
+        for field in ACQUISITION_CONFIG_FIELDS:
+            if field in data:
+                error = _validate_positive_int(data[field], field)
+                if error:
+                    return jsonify({"error": error}), 400
+                config_fields[field] = data[field]
+
+        # Trial-integrity guard (guião secção 7 plan): acquisition config
+        # must not change while a trial is active - a room-only POST is
+        # still allowed even with an active trial, same as today, since a
+        # room correction doesn't retroactively invalidate already-collected
+        # timing data the way a scan-duration change would.
+        if config_fields and current_experiment_id:
+            return jsonify({
+                "error": (
+                    f"Não é possível alterar a configuração de aquisição de '{esp_id}' "
+                    f"com um ensaio ativo ('{current_experiment_id}')"
+                )
+            }), 409
+
+        update_fields = dict(config_fields)
+        if room:
+            update_fields["room"] = room
         # Upsert mapping (insert or update existing)
-        esp_mapping.update_one({"esp_id": esp_id}, {"$set": {"room": room}}, upsert=True)
-        return jsonify({"status": "ok"})
+        esp_mapping.update_one({"esp_id": esp_id}, {"$set": update_fields}, upsert=True)
+
+        response = {"status": "ok"}
+        if config_fields:
+            # The node only re-reads config once, at boot (cadência
+            # só-arranque) - without this note, a successful POST looks like
+            # it took effect immediately.
+            response["note"] = "A nova configuração só faz efeito depois de reiniciar o nó fisicamente."
+        return jsonify(response)
     # On GET return list of mappings
     rooms = list(esp_mapping.find({}, {"_id": 0}))
     return jsonify(rooms)
@@ -359,8 +432,46 @@ def esp_mapping_api():
 @app.route("/api/delete-room/<esp_id>", methods=["DELETE"])
 @auth_required
 def delete_room(esp_id):
+    # Blocks ANY deletion while a trial is active, not only when the
+    # esp_mapping document being removed carries a scan-config override -
+    # losing a node's ROOM mid-trial makes its subsequent detections resolve
+    # to "unknown", a worse corruption than a stale acquisition-config value
+    # and one the narrower version of this guard left completely unprotected.
+    if current_experiment_id and esp_mapping.find_one({"esp_id": esp_id}):
+        return jsonify({
+            "error": (
+                f"Não é possível remover o mapeamento de '{esp_id}' com um ensaio ativo "
+                f"('{current_experiment_id}') - as deteções seguintes desse nó ficariam sem sala."
+            )
+        }), 409
     esp_mapping.delete_one({"esp_id": esp_id})
     return jsonify({"status": "ok"})
+
+# Node-facing config endpoint (guião secção 7) - a node fetches its
+# effective scan_duration_sec/upload_interval_ms once at boot instead of
+# having them compiled in. No @auth_required: same precedent as
+# /api/bledata - devices never send X-User. An unmapped/unknown esp_id
+# simply falls back to the global defaults rather than erroring, mirroring
+# bledata()'s own room="unknown" fallback (mapping a node to a room, and
+# configuring its scan, are independent concerns).
+@app.route("/api/node-config", methods=["GET"])
+def node_config():
+    esp_id = request.args.get("esp_id") or ""
+    mapping = esp_mapping.find_one({"esp_id": esp_id}) if esp_id else None
+
+    result = {}
+    for field, default in (
+        ("scan_duration_sec", DEFAULT_SCAN_DURATION_SEC),
+        ("upload_interval_ms", DEFAULT_UPLOAD_INTERVAL_MS),
+    ):
+        override = mapping.get(field) if mapping else None
+        if override is not None:
+            result[field] = override
+            result[f"{field}_source"] = "esp_id"
+        else:
+            result[field] = default
+            result[f"{field}_source"] = "default"
+    return jsonify(result)
 
 #==============================================================================
 # SECTION 6B: EXPERIMENT LABELING (for raw_detections)
@@ -735,13 +846,16 @@ MIRTH_STATUS = {"last_success": None, "last_failure": None, "failure_count_sessi
 def _parse_bledata_payload(payload):
     """Accepts the legacy shape (a bare list of device dicts, no batch-level
     metadata) and the new batch shape (an object with esp_id/node_seq/
-    boot_id/node_time plus a "readings" list). Returns (devices, node_seq,
-    node_time, batch_esp_id, boot_id); the new fields are None when absent
-    (legacy format, or NTP unsynced at send time for node_time specifically -
-    boot_id/node_seq are always sent unconditionally by the new firmware,
-    but are defensively coerced to None if missing or the wrong type)."""
+    boot_id/node_time/scan_duration_sec/upload_interval_ms plus a "readings"
+    list). Returns (devices, node_seq, node_time, batch_esp_id, boot_id,
+    scan_duration_sec, upload_interval_ms); the new fields are None when
+    absent (legacy format, or NTP unsynced at send time for node_time
+    specifically). scan_duration_sec/upload_interval_ms are the EFFECTIVE
+    acquisition config the node used for this batch (guião secção 7) -
+    defensively coerced to None if missing or the wrong type, bool excluded
+    explicitly since isinstance(True, int) is True in Python."""
     if isinstance(payload, list):
-        return payload, None, None, None, None
+        return payload, None, None, None, None, None, None
     if isinstance(payload, dict) and isinstance(payload.get("readings"), list):
         batch_esp_id = payload.get("esp_id")
         # Must be a plain string - it's used as a NODE_SEQ_STATE dict key in
@@ -759,8 +873,14 @@ def _parse_bledata_payload(payload):
         boot_id = payload.get("boot_id")
         if not isinstance(boot_id, int):
             boot_id = None
-        return devices, node_seq, payload.get("node_time"), batch_esp_id, boot_id
-    return None, None, None, None, None
+        scan_duration_sec = payload.get("scan_duration_sec")
+        if isinstance(scan_duration_sec, bool) or not isinstance(scan_duration_sec, int):
+            scan_duration_sec = None
+        upload_interval_ms = payload.get("upload_interval_ms")
+        if isinstance(upload_interval_ms, bool) or not isinstance(upload_interval_ms, int):
+            upload_interval_ms = None
+        return devices, node_seq, payload.get("node_time"), batch_esp_id, boot_id, scan_duration_sec, upload_interval_ms
+    return None, None, None, None, None, None, None
 
 
 def _check_node_seq(esp_id, node_seq, boot_id, now_dt, num_readings):
@@ -850,7 +970,9 @@ def bledata():
     global live_devices, beacon_locations, manually_sent_beacons
 
     payload = request.get_json()
-    devices, node_seq, node_time, batch_esp_id, boot_id = _parse_bledata_payload(payload)
+    devices, node_seq, node_time, batch_esp_id, boot_id, batch_scan_duration_sec, batch_upload_interval_ms = (
+        _parse_bledata_payload(payload)
+    )
     if devices is None:
         return jsonify({"error": "Invalid data format"}), 400
 
@@ -892,9 +1014,14 @@ def bledata():
             esp_id = ""
         device["esp_id"] = esp_id
 
-        # Map esp_id to a room name, default to 'unknown'
+        # Map esp_id to a room name, default to 'unknown'. mapping.get(...)
+        # rather than mapping["room"] - a mapping doc can now exist with
+        # only acquisition-config fields set and no room yet (see
+        # esp_mapping_api's config-only POST path), which must resolve to
+        # "unknown" here rather than raising KeyError on this endpoint,
+        # bledata()'s highest-traffic, unauthenticated route.
         mapping = esp_mapping.find_one({"esp_id": device.get("esp_id", "")})
-        device["room"] = mapping["room"] if mapping else "unknown"
+        device["room"] = mapping.get("room", "unknown") if mapping else "unknown"
         # Unique key per mac+esp to store latest observation
         key = f"{mac}_{device.get('esp_id','')}"
         bledata.live_devices_dict[key] = device.copy()
@@ -914,6 +1041,13 @@ def bledata():
                 "node_time": node_time,
                 "node_seq": node_seq,
                 "boot_id": boot_id,
+                # Effective acquisition config the node used for THIS batch
+                # (guião secção 7) - lets analyze_room_decisions.py detect
+                # divergence between what was registered for the trial and
+                # what a node actually used, per (a)/(b) in the remote-config
+                # plan. None for legacy-format senders or older data.
+                "scan_duration_sec": batch_scan_duration_sec,
+                "upload_interval_ms": batch_upload_interval_ms,
                 "batch_id": batch_id,
                 "experiment_id": current_experiment_id,
             })
@@ -1138,6 +1272,7 @@ def node_status():
 @app.route("/api/send-active-beacons-to-mirth", methods=["POST"])
 @auth_required
 def send_active_beacons_to_mirth():
+    print("========== MIRTH ENDPOINT CHAMADO ==========")
     global beacon_locations  # (left for compatibility; not used for sending)
 
     try:
@@ -1167,13 +1302,16 @@ def send_active_beacons_to_mirth():
             "beacons": beacons_to_send,
             "summary": "Successfully sent active beacons to Mirth"
         }
-        requests.post(
+        response = requests.post(
             mirth_url,
             json=payload,
             timeout=5,
             headers={'Content-Type': 'application/json'}
         )
 
+        print(f"[MIRTH] URL: {mirth_url}")
+        print(f"[MIRTH] HTTP status: {response.status_code}")
+        print(f"[MIRTH] Response: {response.text}")
         # Return summary of operation
         return jsonify({
             "status": "success",

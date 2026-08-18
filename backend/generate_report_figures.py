@@ -33,6 +33,7 @@ import metrics
 from statistical_analysis import (
     METHODS, FINAL_METHOD, descriptive_stats,
     check_consistent_analysis_parameters, check_room_consistency,
+    check_scenario_consistency, check_scenario_concentration,
 )
 
 plt.rcParams.update({
@@ -529,8 +530,15 @@ def cmd_parameter_sweep(args):
 # Figura 9 - exatidão por cenário
 # ---------------------------------------------------------------------------
 
+LOW_N_COLOR = "#fff3cd"          # âmbar claro - poucas observações (convenção, não fronteira estatística)
+CONCENTRATED_COLOR = "#f8d7da"   # vermelho/rosa claro - célula dominada por uma repetição (problema diferente do N)
+BOTH_FLAGS_COLOR = "#e2d9f3"     # roxo claro - os dois problemas ao mesmo tempo, para não ficar ambíguo qual se aplica
+
+
 def cmd_scenario_table(args):
     warnings = check_consistent_analysis_parameters(args.detail_csv, prefix="raw_with_decisions_")
+    _print_warnings(warnings, "scenario-table")
+    warnings = check_scenario_consistency(args.detail_csv)
     _print_warnings(warnings, "scenario-table")
 
     frames = [pd.read_csv(p) for p in args.detail_csv]
@@ -544,29 +552,83 @@ def cmd_scenario_table(args):
 
     gt = gt[gt["ground_truth_scenario"].notna()]
     scenarios = sorted(gt["ground_truth_scenario"].unique())
+
+    # Concentração só faz sentido como aviso quando há mais do que uma
+    # repetição a agregar - com 1 única repetição, max_share=1.0 por
+    # definição (não há nada para comparar), e marcar isso seria ruído,
+    # não sinal. check_scenario_concentration em si fica sempre correta/
+    # pura (é um cálculo honesto mesmo a n=1); é aqui, na apresentação,
+    # que se decide não usar esse resultado nesse caso.
+    n_repetitions_overall = gt["experiment_id"].nunique()
+    concentration_by_scenario = check_scenario_concentration(gt, args.concentration_threshold)
+    if n_repetitions_overall > 1:
+        for scenario, info in concentration_by_scenario.items():
+            if info["concentrated"]:
+                _warn(
+                    f"[scenario-table] Cenário {scenario!r}: {info['by_experiment'][info['dominant_experiment']]}/"
+                    f"{info['total']} ({info['max_share'] * 100:.1f}%) vêm de uma única repetição "
+                    f"({info['dominant_experiment']}) - distribuição: {info['by_experiment']}"
+                )
+
     header = ["Cenário"] + [METHOD_LABELS_PT[m].replace("\n", " ") for m in METHODS]
     rows = []
-    for scenario in scenarios:
+    flagged_rows = {}  # row_idx -> "low_n" | "concentrated" | "both"
+    for row_idx, scenario in enumerate(scenarios):
         sub = gt[gt["ground_truth_scenario"] == scenario]
-        row = [scenario]
+        total = len(sub)
+
+        low_n = 0 < total < args.min_observations
+        concentrated = n_repetitions_overall > 1 and concentration_by_scenario.get(scenario, {}).get("concentrated", False)
+        markers = ("*" if low_n else "") + ("†" if concentrated else "")
+        label = f"{scenario} (n={total})" + (f" {markers}" if markers else "")
+        if low_n and concentrated:
+            flagged_rows[row_idx] = "both"
+        elif low_n:
+            flagged_rows[row_idx] = "low_n"
+        elif concentrated:
+            flagged_rows[row_idx] = "concentrated"
+
+        row = [label]
         for method in METHODS:
             # Replica exatamente a regra de exatidão de
             # metrics.compute_ground_truth_metrics: linha não decidida
             # (estimated_room None) com ground truth conhecido conta
-            # como errada, nunca é excluída do denominador.
+            # como errada, nunca é excluída do denominador. Confirmado
+            # empiricamente (não só por leitura de código) que esta é a
+            # MESMA convenção usada em decision_summary_<label>.csv's
+            # accuracy - ver Contexto do plano.
             correct = (sub[f"{method}_room"] == sub["ground_truth_room"]).sum()
-            total = len(sub)
             row.append(f"{correct / total * 100:.1f}%" if total else "sem dados")
         rows.append(row)
 
-    fig, ax = plt.subplots(figsize=(10, 1 + 0.6 * len(rows)))
+    fig, ax = plt.subplots(figsize=(10, 1.6 + 0.6 * len(rows)))
     ax.axis("off")
     table = ax.table(cellText=rows, colLabels=header, loc="center", cellLoc="center")
     table.auto_set_font_size(False)
     table.set_fontsize(11)
     table.auto_set_column_width(col=list(range(len(header))))
     table.scale(1, 1.8)
+
+    flag_colors = {"low_n": LOW_N_COLOR, "concentrated": CONCENTRATED_COLOR, "both": BOTH_FLAGS_COLOR}
+    for row_idx, flag in flagged_rows.items():
+        for col in range(len(header)):
+            table[(row_idx + 1, col)].set_facecolor(flag_colors[flag])  # +1: linha 0 da tabela é o cabeçalho
+
     ax.set_title("Exatidão por cenário e método")
+    footnote_lines = []
+    if any(f in ("low_n", "both") for f in flagged_rows.values()):
+        footnote_lines.append(
+            f"* menos de {args.min_observations} observações - convenção para sinalizar poucas "
+            "observações, não um critério de validade estatística."
+        )
+    if any(f in ("concentrated", "both") for f in flagged_rows.values()):
+        footnote_lines.append(
+            f"† mais de {args.concentration_threshold * 100:.0f}% das observações vêm de uma única "
+            "repetição - célula não genuinamente agregada; ver consola para a distribuição completa."
+        )
+    if footnote_lines:
+        fig.text(0.5, 0.01, "\n".join(footnote_lines), ha="center", fontsize=9, color="#555555")
+
     _savefig(fig, os.path.join(args.output_dir, f"tabela_cenarios_{args.label}.png"))
 
 
@@ -635,6 +697,10 @@ def main():
 
     p9 = sub.add_parser("scenario-table", help="Figura 9: exatidão por cenário e método")
     p9.add_argument("--detail-csv", nargs="+", required=True, help="um ou mais raw_with_decisions_<label>.csv")
+    p9.add_argument("--min-observations", type=int, default=30,
+                     help="abaixo disto, a linha do cenário fica marcada com * (convenção, não fronteira estatística; default: 30)")
+    p9.add_argument("--concentration-threshold", type=float, default=0.5,
+                     help="fração acima da qual uma única repetição a dominar o cenário marca a linha com † (default: 0.5)")
     add_common(p9)
     p9.set_defaults(func=cmd_scenario_table)
 

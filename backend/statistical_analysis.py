@@ -418,6 +418,97 @@ def check_room_consistency(confusion_csv_paths):
     ]
 
 
+def check_scenario_consistency(detail_csv_paths):
+    """Compares the set of ground_truth_scenario values across
+    raw_with_decisions_<label>.csv files being aggregated for the
+    per-scenario accuracy table (figure 9, guião secção 9) - same pattern
+    as check_room_consistency, same philosophy (warns, never blocks): a
+    scenario absent from one repetition would otherwise silently give that
+    scenario's aggregated cell fewer observations than the others, with no
+    signal that it happened. This is an inconsistency warning about the
+    REPETITION SET, not an error about any single repetition - a trial
+    missing one scenario is still valid for its other scenarios.
+
+    Older/synthetic CSVs (e.g. from simulate_metrics_trial.py, predating
+    scenario tagging) may be missing the ground_truth_scenario column
+    entirely, not just empty - treated as contributing no scenarios rather
+    than raising KeyError. Returns a list of human-readable warnings
+    (empty = consistent)."""
+    scenarios_by_path = {}
+    for path in detail_csv_paths:
+        df = pd.read_csv(path)
+        if "ground_truth_scenario" not in df.columns:
+            scenarios_by_path[path] = set()
+            continue
+        gt = df[df["ground_truth_room"].notna()]
+        scenarios_by_path[path] = set(gt["ground_truth_scenario"].dropna().unique())
+
+    all_scenarios = set()
+    common_scenarios = None
+    for scenarios in scenarios_by_path.values():
+        all_scenarios |= scenarios
+        common_scenarios = scenarios if common_scenarios is None else (common_scenarios & scenarios)
+    common_scenarios = common_scenarios or set()
+
+    only_in_some = all_scenarios - common_scenarios
+    if not only_in_some:
+        return []
+    details = []
+    for scenario in sorted(only_in_some):
+        present_in = [os.path.basename(p) for p, scenarios in scenarios_by_path.items() if scenario in scenarios]
+        details.append(f"{scenario!r} só em {present_in}")
+    return [
+        "Cenários não são os mesmos em todas as repetições - uma célula "
+        "cujo cenário falte nalguma repetição fica com menos observações "
+        "do que as outras, sem sinal nenhum de que isso aconteceu: "
+        + "; ".join(details)
+    ]
+
+
+def check_scenario_concentration(gt_df, concentration_threshold=0.5):
+    """Different question from check_scenario_consistency: a scenario can
+    be present in every repetition and STILL be, in practice, the result
+    of one repetition wearing several repetitions' clothing - e.g. n=45
+    where 31 come from a single experiment_id. Groups by experiment_id
+    (already a column in raw_with_decisions_<label>.csv - no separate
+    repetition-label bookkeeping needed) within each scenario, and flags
+    any scenario where the single most-represented repetition exceeds
+    `concentration_threshold` of that scenario's total.
+
+    gt_df: already filtered by the caller to ground_truth_room notna,
+    ground_truth_scenario notna, and (if relevant) a single mac -
+    raw_with_decisions_<label>.csv can hold multiple macs, and this
+    function has no way to know which one the caller cares about, so it
+    trusts gt_df rather than re-deriving its own filter from file paths
+    (which risks silently diverging from whatever filter the caller
+    already applied for the accuracy numbers themselves).
+
+    Returns {scenario: {"total", "by_experiment": {experiment_id: count},
+    "max_share", "dominant_experiment", "concentrated"}} for EVERY
+    scenario present, not just the concentrated ones, so callers can
+    report the full distribution regardless of the flag."""
+    result = {}
+    for scenario, sub in gt_df.groupby("ground_truth_scenario"):
+        total = len(sub)
+        by_experiment = sub.groupby("experiment_id").size().sort_values(ascending=False)
+        dominant_experiment = by_experiment.index[0] if len(by_experiment) else None
+        max_share = (by_experiment.iloc[0] / total) if total else 0.0
+        # Cast away numpy scalar types (int64/float64/bool_) before
+        # returning - pandas groupby/.size() leaks them otherwise, and
+        # numpy.bool_ fails an `is True`/`is False` identity check even
+        # though it's truthy-equal, the kind of friction this project's
+        # own _records_with_none (analyze_room_decisions.py) exists to
+        # avoid for the same class of problem.
+        result[scenario] = {
+            "total": int(total),
+            "by_experiment": {k: int(v) for k, v in by_experiment.to_dict().items()},
+            "max_share": float(max_share),
+            "dominant_experiment": dominant_experiment,
+            "concentrated": bool(max_share > concentration_threshold),
+        }
+    return result
+
+
 def build_repetition_table(records_by_label, mac, metric):
     """{método: {repetition_label: valor|None}} - pivot único de que tudo
     o resto parte. "mac não estava nesta repetição" e "mac sem ground

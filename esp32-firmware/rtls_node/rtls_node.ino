@@ -1,5 +1,3 @@
-
-
 /*
   RTLS Node - ESP32 BLE Scanner + WiFi Uploader
   ------------------------------------------------
@@ -7,6 +5,7 @@
     {
       "esp_id": "...", "node_seq": 42, "boot_id": 123456789,
       "node_time": "2026-08-04 10:15:32",   // omitido se o relogio nao estiver sincronizado
+      "scan_duration_sec": 5, "upload_interval_ms": 10000,  // configuracao efetiva usada neste lote (guiao seccao 7)
       "readings": [ {"mac": "...", "rssi": -65}, ... ]
     }
   O backend (backend/app.py) tambem continua a aceitar o formato antigo
@@ -21,6 +20,15 @@
   - boot_id (aleatorio, gerado uma vez por arranque) identifica uma sessao
     continua de funcionamento do no - node_seq reinicia a cada arranque, e
     sem boot_id dois arranques diferentes podiam parecer duplicados.
+
+  Configuracao de aquisicao remota (guiao secção 7):
+  - SCAN_DURATION_SEC/UPLOAD_INTERVAL_MS deixam de estar fixos no codigo -
+    o no vai busca-los UMA VEZ no arranque a NODE_CONFIG_URL (derivado de
+    SERVER_URL por substituicao do caminho, nunca uma constante separada -
+    ver buildNodeConfigUrl()). Se o pedido falhar por qualquer razao (sem
+    rede, backend em baixo, resposta invalida), mantem os valores de
+    fabrica abaixo - nunca bloqueia o arranque. Nao ha nova consulta depois
+    do arranque: uma alteracao so faz efeito apos reiniciar o no.
 
   Bibliotecas necessárias (Arduino IDE > Gerir Bibliotecas):
     - ArduinoJson (by Benoit Blanchon), v6.x
@@ -38,23 +46,25 @@
 #include <time.h>
 
 // ---------- CONFIGURAÇÃO (edita estes valores) ----------
-const char* WIFI_SSID     = "Vodafone-1D9C95";
-const char* WIFI_PASSWORD = "v8De7Gt878";
+const char* WIFI_SSID     = "ULSG_UTENTES";
+const char* WIFI_PASSWORD = "";
 
 // IP do portátil onde o Flask corre, na mesma rede WiFi do ESP32, porta 5000.
 // Descobre com "ipconfig" no PowerShell (adaptador Wi-Fi, endereço IPv4).
-const char* SERVER_URL    = "http://192.168.1.199:5000/api/bledata";
+const char* SERVER_URL    = "http://172.29.128.226:5000/api/bledata";
 
 // Identificador único deste nó - tem de coincidir, carácter a carácter, com
 // o esp_id que registares no mapeamento de salas (dashboard ou
 // POST /api/esp-mapping). Ex: "ESP-101".
-const char* ESP_ID        = "ESP-02";
+const char* ESP_ID        = "ESP-01";
 
-// Duração de cada scan BLE, em segundos
-const int SCAN_DURATION_SEC = 5;
+// Duração de cada scan BLE, em segundos - valor de fábrica, substituído no
+// arranque pelo que vier de GET /api/node-config (ver fetchNodeConfig()).
+int SCAN_DURATION_SEC = 5;
 
-// Intervalo entre envios de dados ao servidor, em milissegundos
-const unsigned long UPLOAD_INTERVAL_MS = 10000;
+// Intervalo entre envios de dados ao servidor, em milissegundos - mesma
+// nota acima.
+unsigned long UPLOAD_INTERVAL_MS = 10000;
 
 // Servidor NTP - pool público por default. Se a rede do hospital bloquear
 // NTP externo (porta UDP 123 de saída), muda para um servidor NTP interno
@@ -82,6 +92,10 @@ unsigned long lastNtpResync = 0;
 uint32_t nodeSeq = 0;   // contador local de lotes - incrementa a cada tentativa de envio
 uint32_t bootId = 0;    // identifica esta sessão de arranque - ver comentário no topo
 
+String nodeConfigUrl;              // construído uma vez no arranque, ver buildNodeConfigUrl()
+bool scanDurationFromBackend = false;
+bool uploadIntervalFromBackend = false;
+
 void connectWiFi() {
   Serial.print("A ligar ao WiFi");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -106,6 +120,53 @@ void syncTime(uint32_t timeoutMs) {
   }
 }
 
+// NODE_CONFIG_URL não é uma constante própria - deriva-se de SERVER_URL por
+// substituição do caminho, para que exista só UM IP/porta a editar neste
+// ficheiro. Duas URLs independentes podiam ficar dessincronizadas em
+// silêncio ao mudar de rede (já aconteceu); assim isso é impossível.
+String buildNodeConfigUrl() {
+  String url = SERVER_URL;
+  url.replace("/api/bledata", "/api/node-config");
+  return url;
+}
+
+// Vai buscar a configuração de aquisição (scan_duration_sec/upload_interval_ms)
+// ao backend, uma única vez no arranque (guião secção 7). Falha em qualquer
+// passo (sem rede, HTTP != 200, JSON inválido, campo em falta ou de tipo
+// errado) mantém os valores de fábrica já atribuídos acima - nunca impede
+// o arranque.
+void fetchNodeConfig() {
+  String url = nodeConfigUrl + "?esp_id=" + ESP_ID;
+  HTTPClient http;
+  http.begin(url);
+  http.setTimeout(5000);
+  int httpCode = http.GET();
+
+  if (httpCode != 200) {
+    Serial.printf("Aviso: falha ao obter configuração do nó (HTTP %d) - a usar valores de fábrica.\n", httpCode);
+    http.end();
+    return;
+  }
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+
+  if (err) {
+    Serial.printf("Aviso: resposta de configuração inválida (%s) - a usar valores de fábrica.\n", err.c_str());
+    return;
+  }
+
+  if (doc["scan_duration_sec"].is<int>() && doc["scan_duration_sec"].as<int>() > 0) {
+    SCAN_DURATION_SEC = doc["scan_duration_sec"].as<int>();
+    scanDurationFromBackend = true;
+  }
+  if (doc["upload_interval_ms"].is<int>() && doc["upload_interval_ms"].as<int>() > 0) {
+    UPLOAD_INTERVAL_MS = (unsigned long)doc["upload_interval_ms"].as<int>();
+    uploadIntervalFromBackend = true;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -122,6 +183,12 @@ void setup() {
 
   syncTime(10000); // sincronização inicial, timeout generoso
   lastNtpResync = millis();
+
+  nodeConfigUrl = buildNodeConfigUrl();
+  fetchNodeConfig();
+  Serial.printf("Configuração efetiva: scan_duration_sec=%d (%s), upload_interval_ms=%lu (%s)\n",
+                SCAN_DURATION_SEC, scanDurationFromBackend ? "backend" : "fábrica",
+                UPLOAD_INTERVAL_MS, uploadIntervalFromBackend ? "backend" : "fábrica");
 
   BLEDevice::init(ESP_ID);
   pBLEScan = BLEDevice::getScan();
@@ -157,7 +224,7 @@ void loop() {
   }
 
   // 2. Monta o objeto JSON do lote:
-  //    {"esp_id","node_seq","boot_id","node_time"?,"readings":[{"mac","rssi"}, ...]}
+  //    {"esp_id","node_seq","boot_id","node_time"?,"scan_duration_sec","upload_interval_ms","readings":[{"mac","rssi"}, ...]}
   StaticJsonDocument<4096> doc;
   doc["esp_id"] = ESP_ID;
   JsonArray readings = doc.createNestedArray("readings");
@@ -181,6 +248,8 @@ void loop() {
     nodeSeq++;
     doc["node_seq"] = nodeSeq;
     doc["boot_id"] = bootId;
+    doc["scan_duration_sec"] = SCAN_DURATION_SEC;
+    doc["upload_interval_ms"] = UPLOAD_INTERVAL_MS;
     if (haveTime) {
       doc["node_time"] = nodeTimeStr;
     }
