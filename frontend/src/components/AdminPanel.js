@@ -146,7 +146,7 @@ function AdminPanel() {
           </div>
         </div>
         <small className="text-muted d-block mb-2">
-          Scan Duration / Upload Interval são opcionais (guião secção 7) - em branco usa os valores globais.
+          Scan Duration / Upload Interval são opcionais - em branco usa os valores globais.
           Bloqueado durante um ensaio ativo, e só faz efeito depois de reiniciar fisicamente o nó.
         </small>
         <button onClick={addMapping} className="btn btn-primary">Add Mapping</button>
