@@ -100,7 +100,7 @@ function AdminPanel() {
   };
 
   return (
-  <div className="card p-4" style={{ maxWidth: 900, margin: "auto", boxShadow: "0 6px 24px #e3e6f0", background: '#fff', color: '#5a5c69', borderRadius: '0.35rem' }}>
+  <div className="card p-4 page-card">
       <h2>ESP Mappings</h2>
       {message && (
         <div className={`alert alert-${message.type} d-flex justify-content-between align-items-center`} role="alert">
@@ -151,7 +151,7 @@ function AdminPanel() {
         </small>
         <button onClick={addMapping} className="btn btn-primary">Add Mapping</button>
       </div>
-      <table className="table table-bordered">
+      <table className="table table-striped">
         <thead>
           <tr>
             <th>ESP ID</th>

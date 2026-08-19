@@ -633,6 +633,209 @@ def cmd_scenario_table(args):
 
 
 # ---------------------------------------------------------------------------
+# Figura extra - exatidão por posição (guião novo, protocolo de 75 ensaios)
+# ---------------------------------------------------------------------------
+# Quase uma cópia de cmd_scenario_table - reutiliza check_scenario_consistency/
+# check_scenario_concentration com column/group_column="trial_position" em
+# vez de reimplementar a mesma agregação/regra de aviso.
+
+def cmd_position_table(args):
+    warnings = check_consistent_analysis_parameters(args.detail_csv, prefix="raw_with_decisions_")
+    _print_warnings(warnings, "position-table")
+    warnings = check_scenario_consistency(args.detail_csv, column="trial_position", label="Posições")
+    _print_warnings(warnings, "position-table")
+
+    frames = [pd.read_csv(p) for p in args.detail_csv]
+    combined = pd.concat(frames, ignore_index=True)
+    if args.mac:
+        combined = combined[combined["mac"] == args.mac]
+    gt = combined[combined["ground_truth_room"].notna()]
+    if "trial_position" not in gt.columns or gt["trial_position"].dropna().empty:
+        _warn("position-table: nenhuma marcação de ground truth tem 'trial_position' reconhecido "
+              "(experiment_id fora da convenção EST-<posição>-R<n>) - a saltar a figura.")
+        return
+
+    gt = gt[gt["trial_position"].notna()]
+    positions = sorted(gt["trial_position"].unique())
+
+    # Mesma justificação de cmd_scenario_table: com 1 única repetição
+    # agregada, max_share=1.0 por definição - marcar isso seria ruído.
+    n_repetitions_overall = gt["experiment_id"].nunique()
+    concentration_by_position = check_scenario_concentration(
+        gt, args.concentration_threshold, group_column="trial_position"
+    )
+    if n_repetitions_overall > 1:
+        for position, info in concentration_by_position.items():
+            if info["concentrated"]:
+                _warn(
+                    f"[position-table] Posição {position!r}: {info['by_experiment'][info['dominant_experiment']]}/"
+                    f"{info['total']} ({info['max_share'] * 100:.1f}%) vêm de uma única repetição "
+                    f"({info['dominant_experiment']}) - distribuição: {info['by_experiment']}"
+                )
+
+    header = ["Posição"] + [METHOD_LABELS_PT[m].replace("\n", " ") for m in METHODS]
+    rows = []
+    flagged_rows = {}
+    for row_idx, position in enumerate(positions):
+        sub = gt[gt["trial_position"] == position]
+        total = len(sub)
+
+        low_n = 0 < total < args.min_observations
+        concentrated = n_repetitions_overall > 1 and concentration_by_position.get(position, {}).get("concentrated", False)
+        markers = ("*" if low_n else "") + ("†" if concentrated else "")
+        label = f"{position} (n={total})" + (f" {markers}" if markers else "")
+        if low_n and concentrated:
+            flagged_rows[row_idx] = "both"
+        elif low_n:
+            flagged_rows[row_idx] = "low_n"
+        elif concentrated:
+            flagged_rows[row_idx] = "concentrated"
+
+        row = [label]
+        for method in METHODS:
+            # Mesma regra de exatidão de metrics.compute_ground_truth_metrics
+            # (e de cmd_scenario_table): linha não decidida conta como
+            # errada, nunca é excluída do denominador.
+            correct = (sub[f"{method}_room"] == sub["ground_truth_room"]).sum()
+            row.append(f"{correct / total * 100:.1f}%" if total else "sem dados")
+        rows.append(row)
+
+    fig, ax = plt.subplots(figsize=(10, 1.6 + 0.6 * len(rows)))
+    ax.axis("off")
+    table = ax.table(cellText=rows, colLabels=header, loc="center", cellLoc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.auto_set_column_width(col=list(range(len(header))))
+    table.scale(1, 1.8)
+
+    flag_colors = {"low_n": LOW_N_COLOR, "concentrated": CONCENTRATED_COLOR, "both": BOTH_FLAGS_COLOR}
+    for row_idx, flag in flagged_rows.items():
+        for col in range(len(header)):
+            table[(row_idx + 1, col)].set_facecolor(flag_colors[flag])
+
+    ax.set_title("Exatidão por posição e método")
+    footnote_lines = []
+    if any(f in ("low_n", "both") for f in flagged_rows.values()):
+        footnote_lines.append(
+            f"* menos de {args.min_observations} observações - convenção para sinalizar poucas "
+            "observações, não um critério de validade estatística."
+        )
+    if any(f in ("concentrated", "both") for f in flagged_rows.values()):
+        footnote_lines.append(
+            f"† mais de {args.concentration_threshold * 100:.0f}% das observações vêm de uma única "
+            "repetição - célula não genuinamente agregada; ver consola para a distribuição completa."
+        )
+    if footnote_lines:
+        fig.text(0.5, 0.01, "\n".join(footnote_lines), ha="center", fontsize=9, color="#555555")
+
+    _savefig(fig, os.path.join(args.output_dir, f"tabela_posicoes_{args.label}.png"))
+
+
+# ---------------------------------------------------------------------------
+# Resumo estático/dinâmico (guião novo, protocolo de 75 ensaios)
+# ---------------------------------------------------------------------------
+# Não recalcula nada - só junta duas coisas já calculadas pela cadeia
+# canónica: as métricas de decision_summary_<experiment_id>.csv (accuracy,
+# num_transitions, num_false_movements, latência, ...) com trial_type/
+# trial_position/duração de raw_with_decisions_<experiment_id>.csv (colunas
+# derivadas por analyze_room_decisions.build_detail_dataframe). Escreve um
+# CSV (não uma figura) - o volume esperado (até 75 ensaios x 4 métodos)
+# não cabe bem numa tabela desenhada como as das figuras 1/9.
+
+def cmd_trial_type_summary(args):
+    warnings = check_consistent_analysis_parameters(args.summary_csv, prefix="decision_summary_")
+    _print_warnings(warnings, "trial-type-summary")
+
+    trial_info = {}  # experiment_id -> {"trial_type", "trial_position", "duration_sec"}
+    for path in args.detail_csv:
+        df = pd.read_csv(path)
+        if "trial_type" not in df.columns:
+            continue
+        for experiment_id, exp_df in df.groupby("experiment_id"):
+            trial_type = exp_df["trial_type"].iloc[0]
+            if pd.isna(trial_type):
+                continue
+            trial_position = exp_df["trial_position"].iloc[0]
+            times = pd.to_datetime(exp_df["effective_time"]).sort_values()
+            duration_sec = (times.iloc[-1] - times.iloc[0]).total_seconds()
+            trial_info[experiment_id] = {
+                "trial_type": trial_type,
+                "trial_position": trial_position if pd.notna(trial_position) else None,
+                "duration_sec": duration_sec,
+            }
+
+    if not trial_info:
+        _warn("trial-type-summary: nenhum --detail-csv tem 'trial_type' reconhecido - a saltar.")
+        return
+
+    rows = []
+    invariant_violations = []
+    for path in args.summary_csv:
+        experiment_id = os.path.splitext(os.path.basename(path))[0].replace("decision_summary_", "")
+        info = trial_info.get(experiment_id)
+        if info is None:
+            continue  # sem --detail-csv correspondente fornecido, ou fora da convenção
+
+        df = pd.read_csv(path)
+        if args.mac:
+            df = df[df["mac"] == args.mac]
+
+        for _, r in df.iterrows():
+            entry = {
+                "experiment_id": experiment_id,
+                "trial_type": info["trial_type"],
+                "trial_position": info["trial_position"],
+                "mac": r["mac"],
+                "method": r["method"],
+                "num_transitions": r.get("num_transitions"),
+            }
+            if info["trial_type"] == "static":
+                duration_min = (info["duration_sec"] / 60.0) if info["duration_sec"] else None
+                entry["location_changes_per_min"] = (
+                    r["num_transitions"] / duration_min if duration_min else None
+                )
+                num_false = r.get("num_false_movements")
+                # Invariante que TEM de se verificar sempre (nunca uma
+                # igualdade - ver plano): uma falsa mudança é sempre também
+                # uma transição, nunca o contrário. Violar isto é sinal de
+                # bug num dos dois cálculos, não de instabilidade genuína.
+                if pd.notna(num_false) and pd.notna(r["num_transitions"]) and num_false > r["num_transitions"]:
+                    invariant_violations.append(
+                        f"{experiment_id} ({r['mac']}, {r['method']}): num_false_movements={num_false} > "
+                        f"num_transitions={r['num_transitions']} - impossível, sinal de bug."
+                    )
+                entry["num_false_movements"] = num_false
+                entry["recoveries_to_correct"] = (
+                    (r["num_transitions"] - num_false)
+                    if pd.notna(num_false) and pd.notna(r["num_transitions"]) else None
+                )
+                entry["accuracy"] = r.get("accuracy")
+            else:  # dynamic
+                entry["accuracy"] = r.get("accuracy")
+                entry["latency_median_sec"] = r.get("latency_median_sec")
+                entry["latency_p95_sec"] = r.get("latency_p95_sec")
+                entry["num_false_movements"] = r.get("num_false_movements")
+                entry["false_movements_per_hour"] = r.get("false_movements_per_hour")
+                entry["missed_movement_rate"] = r.get("missed_movement_rate")
+            rows.append(entry)
+
+    if invariant_violations:
+        for v in invariant_violations:
+            _warn(f"[trial-type-summary] INVARIANTE VIOLADO: {v}")
+
+    if not rows:
+        _warn("trial-type-summary: nenhuma linha combinável (summary/detail sem experiment_id em comum) - a saltar.")
+        return
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    csv_path = os.path.join(args.output_dir, f"resumo_estatico_dinamico_{args.label}.csv")
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    print(f"Resumo estático/dinâmico escrito: {csv_path}")
+    if invariant_violations:
+        print(f"({len(invariant_violations)} violação(ões) do invariante - ver avisos acima)")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -703,6 +906,21 @@ def main():
                      help="fração acima da qual uma única repetição a dominar o cenário marca a linha com † (default: 0.5)")
     add_common(p9)
     p9.set_defaults(func=cmd_scenario_table)
+
+    p10 = sub.add_parser("position-table", help="Exatidão por posição (guião novo, protocolo de 75 ensaios)")
+    p10.add_argument("--detail-csv", nargs="+", required=True, help="um ou mais raw_with_decisions_<label>.csv")
+    p10.add_argument("--min-observations", type=int, default=30,
+                      help="abaixo disto, a linha da posição fica marcada com * (default: 30)")
+    p10.add_argument("--concentration-threshold", type=float, default=0.5,
+                      help="fração acima da qual uma única repetição a dominar a posição marca a linha com † (default: 0.5)")
+    add_common(p10)
+    p10.set_defaults(func=cmd_position_table)
+
+    p11 = sub.add_parser("trial-type-summary", help="Resumo estático/dinâmico por ensaio (guião novo, protocolo de 75 ensaios)")
+    p11.add_argument("--summary-csv", nargs="+", required=True, help="um decision_summary_<experiment_id>.csv por ensaio")
+    p11.add_argument("--detail-csv", nargs="+", required=True, help="um ou mais raw_with_decisions_<label>.csv com trial_type/trial_position")
+    add_common(p11)
+    p11.set_defaults(func=cmd_trial_type_summary)
 
     args = parser.parse_args()
     args.func(args)

@@ -6,6 +6,7 @@
 // section. Backend: GET /api/node-status.
 import { useState, useEffect } from "react";
 import axios from "axios";
+import Badge from "./Badge";
 
 const OFFLINE_THRESHOLD_STORAGE_KEY = "nodeOfflineThresholdSec";
 const DEFAULT_OFFLINE_THRESHOLD_SEC = 60;
@@ -13,12 +14,12 @@ const POLL_MS = 5000;
 
 function OnlineBadge({ secondsSinceLastSeen, thresholdSec }) {
   if (secondsSinceLastSeen == null) {
-    return <span className="badge bg-secondary">Nunca visto</span>;
+    return <Badge tone="secondary">Nunca visto</Badge>;
   }
   if (secondsSinceLastSeen <= thresholdSec) {
-    return <span className="badge bg-success">Online</span>;
+    return <Badge tone="success">Online</Badge>;
   }
-  return <span className="badge bg-danger">Offline</span>;
+  return <Badge tone="danger">Offline</Badge>;
 }
 
 function formatSeconds(value) {
@@ -63,7 +64,7 @@ export default function NodeStatus() {
   };
 
   return (
-    <div className="card p-4" style={{ maxWidth: 1100, margin: "auto" }}>
+    <div className="card p-4 page-card-wide">
       <h2>Estado dos Nós</h2>
 
       {error && <div className="alert alert-danger mb-3">{error}</div>}

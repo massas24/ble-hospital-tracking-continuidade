@@ -1,138 +1,273 @@
-/* General body and background */
+/* ==========================================================================
+   Design tokens - single source of truth for the palette/spacing/radius
+   used across the dashboard. Previously these hex values were retyped
+   inline in Sidebar.js/Navbar.js/every page component, with no shared
+   source - which had already caused real, invisible drift (e.g. the
+   sidebar's inline background disagreed with the CSS "aside" rule below,
+   and lost silently to it because of !important; several page cards'
+   inline shadow overrides were losing the same way). Change a value here,
+   it's consistent everywhere.
+   ========================================================================== */
+:root {
+  --color-bg: #f4f7fa;
+  --color-bg-alt: #f8f9fc;
+  --color-surface: #ffffff;
+  --color-text: #21395a;
+  --color-text-strong: #232e3c;
+  --color-muted: #5a5c69;
+  --color-border: #e3e6f0;
+
+  --color-primary: #4e73df;
+  --color-primary-hover: #2e59d9;
+
+  --color-sidebar-bg: #232e3c;
+  --color-sidebar-active-bg: #1a2230;
+  --color-sidebar-text: #ffffff;
+  --color-sidebar-text-muted: #bfc8d6;
+
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 18px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 6px 24px rgba(0, 0, 0, 0.08);
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+
+  --space-2: 12px;
+  --space-3: 18px;
+  --space-4: 24px;
+  --space-5: 36px;
+
+  --sidebar-width: 230px;
+  --card-max-width: 900px;
+  --card-max-width-wide: 1100px;
+}
+
+/* ---------- Base ---------- */
 body {
-  background: #f4f7fa;
+  background: var(--color-bg);
   font-family: 'Segoe UI', Roboto, Arial, sans-serif;
-  color: #21395a;
+  color: var(--color-text);
   margin: 0;
 }
 
-/* ---------- Sidebar Styles ---------- */
-aside {
-  background: #21395a !important;
-  color: #cbe1ff !important;
-  box-shadow: 2px 0 12px #0001;
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+a:hover {
+  color: var(--color-primary-hover);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  background: var(--color-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-primary);
+  border-radius: 8px;
+}
+
+/* ---------- App shell (sidebar + content) ---------- */
+.app-sidebar {
+  width: var(--sidebar-width);
+  min-height: 100vh;
+  background: var(--color-sidebar-bg);
+  color: var(--color-sidebar-text);
+  position: fixed;
+  left: 0;
+  top: 0;
+  padding-top: 32px;
+  box-shadow: var(--shadow-lg);
+  z-index: 100;
+}
+
+.app-sidebar-brand {
+  font-weight: 700;
+  font-size: 1.15rem;
+  padding: 0 28px 18px;
+  letter-spacing: .5px;
+  color: var(--color-sidebar-text);
+  opacity: 0.85;
+  border-bottom: 1px solid #2c3542;
+  margin-bottom: 18px;
+}
+
+.app-sidebar-section-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--color-sidebar-text-muted);
+  padding: 12px 28px 6px;
+  letter-spacing: .2px;
+}
+
+.app-sidebar-link {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  color: var(--color-sidebar-text);
+  padding: 14px 28px;
+  text-decoration: none;
+  margin-bottom: 6px;
+  border-left: 4px solid transparent;
+  font-weight: 500;
+  font-size: 1.08rem;
+  border-radius: 6px 0 0 6px;
+  transition: background 0.2s, color 0.2s;
+}
+.app-sidebar-link:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--color-sidebar-text);
+}
+.app-sidebar-link.active {
+  background: var(--color-sidebar-active-bg);
+  color: var(--color-primary);
+  font-weight: bold;
+  border-left: 4px solid var(--color-primary);
+}
+
+.app-sidebar-backdrop {
+  display: none;
+}
+
+.app-content {
+  margin-left: var(--sidebar-width);
+  background: var(--color-bg-alt);
   min-height: 100vh;
 }
 
-.sidebarStyle {
-  background: #21395a !important;
-  color: #eaf3ff !important;
-  font-size: 1.08rem;
-  padding-top: 24px;
+.app-content-inner {
+  padding: var(--space-5);
 }
 
-.activeStyle {
-  background: #2c4570 !important;
-  color: #a1c4fd !important;
-  border-left: 4px solid #4e73df;
+/* ---------- Navbar ---------- */
+.app-navbar {
+  display: flex;
+  align-items: center;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-bottom: 1px solid var(--color-border);
+  padding: 0 32px;
+  min-height: 72px;
+  box-shadow: var(--shadow-sm);
 }
 
-/* ---------- Navbar Styles ---------- */
-.navbar {
-  background: #fff !important;
-  color: #21395a !important;
-  box-shadow: 0 2px 8px #0001;
-  border-bottom: 1px solid #e3e6f0;
-}
-
-.nav-link {
-  color: #21395a !important;
-  font-weight: 500;
-  margin-right: 18px;
-  transition: color 0.2s;
-}
-.nav-link:hover {
-  color: #4e73df !important;
+.navbar-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--color-text);
+  padding: 8px;
+  margin-right: 12px;
+  cursor: pointer;
 }
 
 .navbar-brand {
-  color: #4e73df !important;
+  color: var(--color-primary) !important;
   font-weight: 700;
   font-size: 1.3rem;
 }
 
-.btn {
-  background: #4e73df !important;
-  color: #fff !important;
-  font-weight: 600 !important;
-  border-radius: 6px;
-  border: none;
-  box-shadow: 0 2px 8px #4e73df22;
-  padding: 8px 20px;
-  transition: background 0.2s;
-}
-.btn:hover {
-  background: #2e59d9 !important;
+.app-navbar-actions {
+  margin-left: auto;
 }
 
-/* ---------- Card Styles ---------- */
+/* ---------- Cards ---------- */
 .card {
-  background: #fff !important;
-  color: #21395a !important;
-  border-radius: 16px !important;
-  box-shadow: 0 4px 18px #0001 !important;
-  padding: 40px 36px !important;
-  margin-bottom: 36px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 40px var(--space-5);
+  margin-bottom: var(--space-5);
 }
 
 .card h2 {
-  color: #232e3c !important;
-  font-weight: 700 !important;
+  color: var(--color-text-strong);
+  font-weight: 700;
   font-size: 2.2rem;
   margin-bottom: 22px;
   letter-spacing: .5px;
 }
 
-/* ---------- Table Styles ---------- */
+.card h3 {
+  color: var(--color-text-strong);
+  font-weight: 600;
+  font-size: 1.4rem;
+  margin-top: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.card h4 {
+  color: var(--color-text-strong);
+  font-weight: 600;
+  font-size: 1.15rem;
+  margin-bottom: var(--space-2);
+}
+
+.page-card {
+  max-width: var(--card-max-width);
+  margin: 0 auto;
+}
+
+.page-card-wide {
+  max-width: var(--card-max-width-wide);
+  margin: 0 auto;
+}
+
+/* ---------- Tables ---------- */
 .table {
-  background: #fff !important;
-  color: #232e3c !important;
-  border-radius: 10px;
+  --bs-table-striped-bg: var(--color-bg-alt);
+  background: var(--color-surface);
+  color: var(--color-text-strong);
+  border-radius: var(--radius-md);
   overflow: hidden;
-  box-shadow: 0 1px 6px #0001;
-  margin-bottom: 24px;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: var(--space-4);
 }
 
 .table th,
 .table td {
-  background: #fff !important;
-  color: #232e3c !important;
-  border: 1px solid #e3e6f0 !important;
+  border-color: var(--color-border);
   font-weight: 500;
   padding: 14px 18px;
-  font-size: 1.05rem;
+  font-size: 1.02rem;
+  vertical-align: middle;
 }
 
-.table th {
-  color: #4e73df !important;
-  background: #f4f7fa !important;
-  border: 1px solid #e3e6f0 !important;
-  font-size: 1.12rem;
+.table thead th {
+  color: var(--color-primary);
+  background: var(--color-bg);
+  font-size: 1.08rem;
   font-weight: 700;
 }
 
-.table tr:nth-child(even) td {
-  background: #f8f9fc !important;
-}
-
-/* ---------- Links and text ---------- */
-
-a {
-  color: #4e73df;
-  text-decoration: none;
-  transition: color 0.2s;
-}
-a:hover {
-  color: #2e59d9;
-}
-
-/* ---------- Scrollbar Styles (optional) ---------- */
-::-webkit-scrollbar {
-  width: 8px;
-  background: #f4f7fa;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #4e73df;
-  border-radius: 8px;
+/* ---------- Responsive: sidebar becomes an off-canvas drawer ---------- */
+@media (max-width: 768px) {
+  .app-sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+  }
+  .app-sidebar.open {
+    transform: translateX(0);
+  }
+  .app-content {
+    margin-left: 0;
+  }
+  .app-sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 99;
+  }
+  .navbar-toggle {
+    display: inline-flex;
+  }
+  .app-content-inner {
+    padding: var(--space-3);
+  }
 }

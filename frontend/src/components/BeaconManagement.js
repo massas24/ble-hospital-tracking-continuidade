@@ -2,19 +2,20 @@
 // Responsible for displaying active/inactive beacons and sending active beacons to Mirth
 
 import { useState, useEffect } from 'react'; // React hooks used in the component
+import Badge from './Badge';
 
-// Maps location_status to a Bootstrap badge class + display label (guião
-// secção 3.11 - "indicação de localizações ambíguas" was already computed
-// server-side as location_status, just shown as plain text before).
-const STATUS_BADGES = {
-  confirmada: { className: 'bg-success', label: 'Confirmada' },
-  'em transição': { className: 'bg-warning text-dark', label: 'Em transição' },
-  desconhecida: { className: 'bg-secondary', label: 'Desconhecida' },
+// Maps location_status to a badge tone + display label (guião secção 3.11 -
+// "indicação de localizações ambíguas" was already computed server-side as
+// location_status, just shown as plain text before).
+const STATUS_TONES = {
+  confirmada: { tone: 'success', label: 'Confirmada' },
+  'em transição': { tone: 'warning', label: 'Em transição' },
+  desconhecida: { tone: 'secondary', label: 'Desconhecida' },
 };
 
 function StatusBadge({ status }) {
-  const info = STATUS_BADGES[status] || { className: 'bg-light text-dark', label: status || '-' };
-  return <span className={`badge ${info.className}`}>{info.label}</span>;
+  const info = STATUS_TONES[status] || { tone: 'light', label: status || '-' };
+  return <Badge tone={info.tone}>{info.label}</Badge>;
 }
 
 export default function BeaconManagement() {
@@ -133,7 +134,7 @@ export default function BeaconManagement() {
 
   // Render UI
   return (
-    <div className="card p-4" style={{ maxWidth: "900px", margin: "auto" }}>
+    <div className="card p-4 page-card">
       <h2>Beacon Management</h2>
       <div className="mb-3">
         {/* Button to trigger manual send, disabled when loading or no active beacons */}

@@ -418,77 +418,84 @@ def check_room_consistency(confusion_csv_paths):
     ]
 
 
-def check_scenario_consistency(detail_csv_paths):
-    """Compares the set of ground_truth_scenario values across
-    raw_with_decisions_<label>.csv files being aggregated for the
-    per-scenario accuracy table (figure 9, guião secção 9) - same pattern
-    as check_room_consistency, same philosophy (warns, never blocks): a
-    scenario absent from one repetition would otherwise silently give that
-    scenario's aggregated cell fewer observations than the others, with no
-    signal that it happened. This is an inconsistency warning about the
-    REPETITION SET, not an error about any single repetition - a trial
-    missing one scenario is still valid for its other scenarios.
+def check_scenario_consistency(detail_csv_paths, column="ground_truth_scenario", label="Cenários"):
+    """Compares the set of distinct values of `column` across
+    raw_with_decisions_<label>.csv files being aggregated for a per-group
+    accuracy table - default column/label match figure 9's per-scenario
+    table (guião secção 9); generate_report_figures.py's cmd_position_table
+    reuses this SAME function with column="trial_position", label="Posições"
+    for the guião novo's per-position table (protocolo de 75 ensaios) -
+    identical aggregation logic, different grouping key, no reimplementation.
+    Same pattern as check_room_consistency, same philosophy (warns, never
+    blocks): a value absent from one repetition would otherwise silently
+    give that group's aggregated cell fewer observations than the others,
+    with no signal that it happened. This is an inconsistency warning about
+    the REPETITION SET, not an error about any single repetition - a trial
+    missing one scenario/position is still valid for its others.
 
     Older/synthetic CSVs (e.g. from simulate_metrics_trial.py, predating
-    scenario tagging) may be missing the ground_truth_scenario column
-    entirely, not just empty - treated as contributing no scenarios rather
-    than raising KeyError. Returns a list of human-readable warnings
-    (empty = consistent)."""
-    scenarios_by_path = {}
+    scenario tagging, or any CSV predating the EST-/DIN- position
+    convention) may be missing `column` entirely, not just empty - treated
+    as contributing no values rather than raising KeyError. Returns a list
+    of human-readable warnings (empty = consistent)."""
+    values_by_path = {}
     for path in detail_csv_paths:
         df = pd.read_csv(path)
-        if "ground_truth_scenario" not in df.columns:
-            scenarios_by_path[path] = set()
+        if column not in df.columns:
+            values_by_path[path] = set()
             continue
         gt = df[df["ground_truth_room"].notna()]
-        scenarios_by_path[path] = set(gt["ground_truth_scenario"].dropna().unique())
+        values_by_path[path] = set(gt[column].dropna().unique())
 
-    all_scenarios = set()
-    common_scenarios = None
-    for scenarios in scenarios_by_path.values():
-        all_scenarios |= scenarios
-        common_scenarios = scenarios if common_scenarios is None else (common_scenarios & scenarios)
-    common_scenarios = common_scenarios or set()
+    all_values = set()
+    common_values = None
+    for values in values_by_path.values():
+        all_values |= values
+        common_values = values if common_values is None else (common_values & values)
+    common_values = common_values or set()
 
-    only_in_some = all_scenarios - common_scenarios
+    only_in_some = all_values - common_values
     if not only_in_some:
         return []
     details = []
-    for scenario in sorted(only_in_some):
-        present_in = [os.path.basename(p) for p, scenarios in scenarios_by_path.items() if scenario in scenarios]
-        details.append(f"{scenario!r} só em {present_in}")
+    for value in sorted(only_in_some):
+        present_in = [os.path.basename(p) for p, values in values_by_path.items() if value in values]
+        details.append(f"{value!r} só em {present_in}")
     return [
-        "Cenários não são os mesmos em todas as repetições - uma célula "
-        "cujo cenário falte nalguma repetição fica com menos observações "
+        f"{label} não são os mesmos em todas as repetições - uma célula "
+        f"cujo {column} falte nalguma repetição fica com menos observações "
         "do que as outras, sem sinal nenhum de que isso aconteceu: "
         + "; ".join(details)
     ]
 
 
-def check_scenario_concentration(gt_df, concentration_threshold=0.5):
+def check_scenario_concentration(gt_df, concentration_threshold=0.5, group_column="ground_truth_scenario"):
     """Different question from check_scenario_consistency: a scenario can
     be present in every repetition and STILL be, in practice, the result
     of one repetition wearing several repetitions' clothing - e.g. n=45
     where 31 come from a single experiment_id. Groups by experiment_id
     (already a column in raw_with_decisions_<label>.csv - no separate
-    repetition-label bookkeeping needed) within each scenario, and flags
-    any scenario where the single most-represented repetition exceeds
-    `concentration_threshold` of that scenario's total.
+    repetition-label bookkeeping needed) within each group_column value,
+    and flags any group where the single most-represented repetition
+    exceeds `concentration_threshold` of that group's total. group_column
+    defaults to "ground_truth_scenario" (figure 9); cmd_position_table
+    reuses this same function with group_column="trial_position" for the
+    guião novo's per-position table - identical aggregation, different key.
 
     gt_df: already filtered by the caller to ground_truth_room notna,
-    ground_truth_scenario notna, and (if relevant) a single mac -
+    group_column notna, and (if relevant) a single mac -
     raw_with_decisions_<label>.csv can hold multiple macs, and this
     function has no way to know which one the caller cares about, so it
     trusts gt_df rather than re-deriving its own filter from file paths
     (which risks silently diverging from whatever filter the caller
     already applied for the accuracy numbers themselves).
 
-    Returns {scenario: {"total", "by_experiment": {experiment_id: count},
-    "max_share", "dominant_experiment", "concentrated"}} for EVERY
-    scenario present, not just the concentrated ones, so callers can
+    Returns {group_value: {"total", "by_experiment": {experiment_id: count},
+    "max_share", "dominant_experiment", "concentrated"}} for EVERY value of
+    group_column present, not just the concentrated ones, so callers can
     report the full distribution regardless of the flag."""
     result = {}
-    for scenario, sub in gt_df.groupby("ground_truth_scenario"):
+    for group_value, sub in gt_df.groupby(group_column):
         total = len(sub)
         by_experiment = sub.groupby("experiment_id").size().sort_values(ascending=False)
         dominant_experiment = by_experiment.index[0] if len(by_experiment) else None
@@ -499,7 +506,7 @@ def check_scenario_concentration(gt_df, concentration_threshold=0.5):
         # though it's truthy-equal, the kind of friction this project's
         # own _records_with_none (analyze_room_decisions.py) exists to
         # avoid for the same class of problem.
-        result[scenario] = {
+        result[group_value] = {
             "total": int(total),
             "by_experiment": {k: int(v) for k, v in by_experiment.to_dict().items()},
             "max_share": float(max_share),

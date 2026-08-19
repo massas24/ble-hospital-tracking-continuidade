@@ -38,7 +38,7 @@ function WhitelistAdmin() {
   };
 
   return (
-    <div className="card p-4" style={{ maxWidth: "900px", margin: "auto" }}>
+    <div className="card p-4 page-card">
       <h2>Beacon Whitelist</h2>
       <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
         <input

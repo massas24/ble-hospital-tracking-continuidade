@@ -19,9 +19,9 @@ function Devices() {
 
   // Render device table
   return (
-    <div className="card p-4" style={{ maxWidth: 1000, margin: "auto", boxShadow: "0 6px 24px #0001" }}>
+    <div className="card p-4 page-card-wide">
       <h2>Live BLE Devices</h2>
-      <table className="table table-bordered">
+      <table className="table table-striped">
         <thead>
           <tr>
             <th>ESP ID</th><th>ESP Name</th><th>Room</th><th>MAC</th><th>RSSI</th><th>Time</th>

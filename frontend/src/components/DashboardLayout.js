@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import Navbar from "./Navbar";
@@ -11,12 +11,20 @@ import DetectionHistory from "./DetectionHistory";
 import RequireAuth from "./RequireAuth";
 
 function DashboardLayout() {
+  // Only affects layout below the 768px breakpoint (index.css) - the
+  // sidebar is an always-visible fixed column above that, this state is
+  // simply unused visually until the viewport is narrow enough to matter.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
   return (
     <>
-      <Sidebar />
-      <div style={{ marginLeft: 220, background: "#f8f9fc", minHeight: "100vh" }}>
-        <Navbar />
-        <div style={{ padding: 30 }}>
+      <Sidebar open={sidebarOpen} onNavigate={() => setSidebarOpen(false)} />
+      {sidebarOpen && (
+        <div className="app-sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+      )}
+      <div className="app-content">
+        <Navbar onToggleSidebar={() => setSidebarOpen(o => !o)} />
+        <div className="app-content-inner">
           <Routes>
             <Route
               path="/devices"

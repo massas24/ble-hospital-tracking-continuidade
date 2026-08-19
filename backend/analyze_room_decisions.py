@@ -34,6 +34,7 @@ python analyze_room_decisions.py --no-plots # apenas CSVs, ignorar matplotlib
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -79,6 +80,33 @@ NODE_TIME_CLOCK_WARNING = (
 
 def normalize_mac(mac):
     return mac.replace("-", ":").lower().strip().replace('"', "")
+
+
+# Convenção de nomenclatura do protocolo de 75 ensaios (guião do Prof.
+# Carreto): EST-<posição>-R<repetição> para ensaios estáticos,
+# DIN-<rota>-R<repetição> para dinâmicos - ex. "EST-A1-R3", "DIN-AB-R7".
+# Maiúsculas estritas de propósito: um erro de maiúsculas/minúsculas deve
+# ficar sinalizado como aviso (ver batch_analyze_experiments.py), não ser
+# "corrigido" silenciosamente por um regex case-insensitive.
+TRIAL_LABEL_PATTERN = re.compile(r"^(EST|DIN)-([A-Z0-9]+)-R(\d+)$")
+
+
+def parse_trial_label(experiment_id):
+    """Deriva (trial_type, trial_position) a partir da convenção acima -
+    NUNCA guardado em Mongo, calculado aqui exatamente como
+    clock_source/effective_time já são colunas derivadas em
+    build_detail_dataframe. Tolerante: um experiment_id fora do padrão
+    (dados antigos como os Ensaio-01..06, ou qualquer nome livre) devolve
+    (None, None), nunca levanta erro - só analyze_room_decisions.py grava
+    estas colunas, batch_analyze_experiments.py é quem decide avisar sobre
+    um nome que devia ter batido com o padrão e não bateu."""
+    if not experiment_id:
+        return None, None
+    match = TRIAL_LABEL_PATTERN.match(experiment_id)
+    if not match:
+        return None, None
+    prefix, position, _repetition = match.groups()
+    return ("static" if prefix == "EST" else "dynamic"), position
 
 
 def load_detections_by_mac(collection, experiment_id, macs):
@@ -220,6 +248,11 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persiste
     uses_node_time_by_experiment = {
         exp_id: _group_uses_node_time(exp_docs) for exp_id, exp_docs in docs_by_experiment.items()
     }
+    # Idem para trial_type/trial_position (protocolo de 75 ensaios) -
+    # derivado uma vez por experiment_id, não por linha.
+    trial_labels_by_experiment = {
+        exp_id: parse_trial_label(exp_id) for exp_id in docs_by_experiment.keys()
+    }
 
     rows = []
     for doc, b, m, mh, mhp in zip(docs, baseline, median, med_hyst, med_hyst_pers):
@@ -236,6 +269,7 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persiste
         gt_interval = lookup_ground_truth_interval(intervals, effective_time)
         ground_truth_room = gt_interval["room"] if gt_interval else None
         ground_truth_scenario = gt_interval["scenario"] if gt_interval else None
+        trial_type, trial_position = trial_labels_by_experiment.get(experiment_id, (None, None))
         rows.append({
             "time": doc.get("time"),
             "node_time": doc.get("node_time"),
@@ -247,6 +281,8 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persiste
             "esp_id": doc.get("esp_id", ""),
             "batch_id": doc.get("batch_id", ""),
             "experiment_id": experiment_id,
+            "trial_type": trial_type,
+            "trial_position": trial_position,
             "raw_room": doc.get("room"),
             "raw_rssi": doc.get("rssi"),
             "ground_truth_room": ground_truth_room,

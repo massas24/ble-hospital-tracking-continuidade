@@ -105,7 +105,7 @@ export default function DetectionHistory() {
   };
 
   return (
-    <div className="card p-4" style={{ maxWidth: 1100, margin: "auto" }}>
+    <div className="card p-4 page-card-wide">
       <h2>Histórico de Deteções</h2>
 
       {error && <div className="alert alert-danger mb-3">{error}</div>}
