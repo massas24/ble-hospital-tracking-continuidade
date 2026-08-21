@@ -419,38 +419,22 @@ def check_room_consistency(confusion_csv_paths):
 
 
 def check_scenario_consistency(detail_csv_paths, column="ground_truth_scenario", label="Cenários", require_ground_truth=True):
-    """Compares the set of distinct values of `column` across
-    raw_with_decisions_<label>.csv files being aggregated for a per-group
-    accuracy table - default column/label match figure 9's per-scenario
-    table (guião secção 9); generate_report_figures.py's cmd_position_table
-    reuses this SAME function with column="trial_position", label="Posições"
-    for the guião novo's per-position table (protocolo de 75 ensaios) -
-    identical aggregation logic, different grouping key, no reimplementation.
-    Same pattern as check_room_consistency, same philosophy (warns, never
-    blocks): a value absent from one repetition would otherwise silently
-    give that group's aggregated cell fewer observations than the others,
-    with no signal that it happened. This is an inconsistency warning about
-    the REPETITION SET, not an error about any single repetition - a trial
-    missing one scenario/position is still valid for its others.
+    """Compares distinct values of `column` across raw_with_decisions_<label>.csv
+    files being aggregated for a per-group accuracy table (figure 9's
+    scenario table; cmd_position_table reuses this with column="trial_position").
+    Warns, never blocks - a value missing from one repetition would
+    otherwise silently give that group fewer observations than the others,
+    with no signal it happened.
 
-    require_ground_truth (default True, matches original behaviour):
-    whether a row must also have ground_truth_room set to count towards
-    `column`'s distinct values. Correct for ground_truth_scenario/
-    trial_position-when-accuracy-relevant (both only meaningful alongside a
-    real ground truth room, see cmd_scenario_table/cmd_position_table) but
-    WRONG for trial_position at the P1/P2 doorway positions, which have no
-    ground truth by design (see remote-config plan, guião novo secção 5) -
-    with the default True, EVERY P1/P2 row would be filtered out before
-    `column` is ever inspected, silently reporting "consistent" even if an
-    entire repetition's file were missing. cmd_doorway_distribution passes
-    require_ground_truth=False for exactly this reason - caught in design
-    review before shipping, not found later as a silent false negative.
+    require_ground_truth=True (default) filters to ground_truth_room.notna()
+    first - correct for scenario/position when accuracy-relevant, but wrong
+    for trial_position at P1/P2 (no ground truth by design): with the
+    default, every P1/P2 row gets filtered out before `column` is ever
+    inspected, silently reporting "consistent" even with a whole repetition
+    missing. cmd_doorway_distribution passes False for exactly this reason.
 
-    Older/synthetic CSVs (e.g. from simulate_metrics_trial.py, predating
-    scenario tagging, or any CSV predating the EST-/DIN- position
-    convention) may be missing `column` entirely, not just empty - treated
-    as contributing no values rather than raising KeyError. Returns a list
-    of human-readable warnings (empty = consistent)."""
+    Missing `column` entirely (older CSVs) contributes no values rather
+    than raising KeyError. Returns a list of warnings (empty = consistent)."""
     values_by_path = {}
     for path in detail_csv_paths:
         df = pd.read_csv(path)
@@ -483,42 +467,30 @@ def check_scenario_consistency(detail_csv_paths, column="ground_truth_scenario",
 
 
 def check_scenario_concentration(gt_df, concentration_threshold=0.5, group_column="ground_truth_scenario"):
-    """Different question from check_scenario_consistency: a scenario can
-    be present in every repetition and STILL be, in practice, the result
-    of one repetition wearing several repetitions' clothing - e.g. n=45
-    where 31 come from a single experiment_id. Groups by experiment_id
-    (already a column in raw_with_decisions_<label>.csv - no separate
-    repetition-label bookkeeping needed) within each group_column value,
-    and flags any group where the single most-represented repetition
-    exceeds `concentration_threshold` of that group's total. group_column
-    defaults to "ground_truth_scenario" (figure 9); cmd_position_table
-    reuses this same function with group_column="trial_position" for the
-    guião novo's per-position table - identical aggregation, different key.
+    """Different question from check_scenario_consistency: a group can be
+    present in every repetition and still be, in practice, one repetition
+    wearing several repetitions' clothing - e.g. n=45 where 31 come from a
+    single experiment_id. Flags any group_column value where the top
+    repetition exceeds `concentration_threshold` of that group's total.
+    group_column defaults to "ground_truth_scenario" (figure 9);
+    cmd_position_table reuses this with group_column="trial_position".
 
-    gt_df: already filtered by the caller to ground_truth_room notna,
-    group_column notna, and (if relevant) a single mac -
-    raw_with_decisions_<label>.csv can hold multiple macs, and this
-    function has no way to know which one the caller cares about, so it
-    trusts gt_df rather than re-deriving its own filter from file paths
-    (which risks silently diverging from whatever filter the caller
-    already applied for the accuracy numbers themselves).
+    gt_df must already be filtered by the caller (ground_truth_room notna,
+    group_column notna, single mac if relevant) - trusted as-is rather than
+    re-derived here, so it can't silently diverge from the caller's own
+    accuracy-number filter.
 
-    Returns {group_value: {"total", "by_experiment": {experiment_id: count},
-    "max_share", "dominant_experiment", "concentrated"}} for EVERY value of
-    group_column present, not just the concentrated ones, so callers can
-    report the full distribution regardless of the flag."""
+    Returns {group_value: {"total", "by_experiment", "max_share",
+    "dominant_experiment", "concentrated"}} for every value present, not
+    just concentrated ones."""
     result = {}
     for group_value, sub in gt_df.groupby(group_column):
         total = len(sub)
         by_experiment = sub.groupby("experiment_id").size().sort_values(ascending=False)
         dominant_experiment = by_experiment.index[0] if len(by_experiment) else None
         max_share = (by_experiment.iloc[0] / total) if total else 0.0
-        # Cast away numpy scalar types (int64/float64/bool_) before
-        # returning - pandas groupby/.size() leaks them otherwise, and
-        # numpy.bool_ fails an `is True`/`is False` identity check even
-        # though it's truthy-equal, the kind of friction this project's
-        # own _records_with_none (analyze_room_decisions.py) exists to
-        # avoid for the same class of problem.
+        # numpy.bool_/int64 leak from groupby/.size() and fail `is True`
+        # identity checks despite being value-equal - cast to native types.
         result[group_value] = {
             "total": int(total),
             "by_experiment": {k: int(v) for k, v in by_experiment.to_dict().items()},

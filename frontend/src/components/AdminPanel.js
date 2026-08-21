@@ -10,13 +10,12 @@ function AdminPanel() {
   const [defaults, setDefaults] = useState(null);
   const username = localStorage.getItem("username");
 
-  
   useEffect(() => {
     if (!username) return;
     axios.get("/api/esp-mapping", { headers: { "X-User": username } })
       .then(res => setMappings(res.data))
       .catch(console.error);
-    
+
     axios.get("/api/node-config")
       .then(res => setDefaults({
         scan_duration_sec: res.data.scan_duration_sec,
@@ -30,7 +29,6 @@ function AdminPanel() {
     setMappings(res.data);
   };
 
-  
   const addMapping = async () => {
     setMessage(null);
     const espId = form.esp_id.trim();
@@ -73,14 +71,12 @@ function AdminPanel() {
     }
   };
 
-
   const deleteMapping = async (esp_id) => {
     setMessage(null);
     try {
       await axios.delete(`/api/delete-room/${esp_id}`, { headers: { "X-User": username } });
       setMappings(mappings.filter(m => m.esp_id !== esp_id));
     } catch (err) {
-      
       setMessage({ type: "danger", text: err.response?.data?.error || "Failed to delete mapping" });
     }
   };

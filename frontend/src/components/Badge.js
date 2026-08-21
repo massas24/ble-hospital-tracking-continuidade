@@ -1,4 +1,3 @@
-
 const TONE_CLASSES = {
   success: "bg-success",
   warning: "bg-warning text-dark",

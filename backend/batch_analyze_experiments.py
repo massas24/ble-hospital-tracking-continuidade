@@ -29,11 +29,8 @@ from pymongo import MongoClient
 
 from analyze_room_decisions import parse_trial_label
 
-# Posições sem sala verdadeira definível (soleira das portas) - a única
-# situação em que a ausência de ground truth é esperada por desenho, não um
-# esquecimento. Qualquer outra posição estática sem nenhum evento de
-# ground truth é o erro mais provável com 75 ensaios em jogo (foi assim que
-# uma campanha anterior identificou e excluiu um ensaio inválido).
+# Soleiras de porta, sem sala verdadeira definível - a única situação onde
+# a ausência de ground truth é esperada por desenho, não um esquecimento.
 NO_GROUND_TRUTH_EXPECTED_POSITIONS = {"P1", "P2"}
 
 
@@ -128,10 +125,6 @@ def main():
         summary_paths.append(summary_csv)
         detail_paths.append(detail_csv)
 
-        # Aviso de PROTOCOLO (não de bug de software): ground truth em
-        # falta é esperado por desenho só em P1/P2 (sem sala verdadeira
-        # definível) - em qualquer outra posição estática, ausência total
-        # é o esquecimento de marcação mais provável com 75 ensaios em jogo.
         if trial_type == "static" and trial_position not in NO_GROUND_TRUTH_EXPECTED_POSITIONS:
             with open(metadata_json, encoding="utf-8") as f:
                 run_metadata = json.load(f)

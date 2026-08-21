@@ -82,24 +82,17 @@ def normalize_mac(mac):
     return mac.replace("-", ":").lower().strip().replace('"', "")
 
 
-# Convenção de nomenclatura do protocolo de 75 ensaios (guião do Prof.
-# Carreto): EST-<posição>-R<repetição> para ensaios estáticos,
-# DIN-<rota>-R<repetição> para dinâmicos - ex. "EST-A1-R3", "DIN-AB-R7".
-# Maiúsculas estritas de propósito: um erro de maiúsculas/minúsculas deve
-# ficar sinalizado como aviso (ver batch_analyze_experiments.py), não ser
-# "corrigido" silenciosamente por um regex case-insensitive.
+# Convenção de nomenclatura do protocolo de 75 ensaios: EST-<posição>-R<n>
+# para estáticos, DIN-<rota>-R<n> para dinâmicos (ex. "EST-A1-R3"). Maiúsculas
+# estritas - um erro de maiúsculas deve ficar sinalizado como aviso (ver
+# batch_analyze_experiments.py), não "corrigido" em silêncio.
 TRIAL_LABEL_PATTERN = re.compile(r"^(EST|DIN)-([A-Z0-9]+)-R(\d+)$")
 
 
 def parse_trial_label(experiment_id):
-    """Deriva (trial_type, trial_position) a partir da convenção acima -
-    NUNCA guardado em Mongo, calculado aqui exatamente como
-    clock_source/effective_time já são colunas derivadas em
-    build_detail_dataframe. Tolerante: um experiment_id fora do padrão
-    (dados antigos como os Ensaio-01..06, ou qualquer nome livre) devolve
-    (None, None), nunca levanta erro - só analyze_room_decisions.py grava
-    estas colunas, batch_analyze_experiments.py é quem decide avisar sobre
-    um nome que devia ter batido com o padrão e não bateu."""
+    """(trial_type, trial_position) derivados do experiment_id - nunca
+    guardado em Mongo, coluna derivada como clock_source/effective_time.
+    Tolerante: fora do padrão devolve (None, None), nunca levanta erro."""
     if not experiment_id:
         return None, None
     match = TRIAL_LABEL_PATTERN.match(experiment_id)

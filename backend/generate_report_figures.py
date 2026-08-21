@@ -57,13 +57,9 @@ METHOD_LABELS_PT = {
     "median_hysteresis_persistence": "Método\ncombinado",
 }
 UNKNOWN_ROOM_LABEL = "desconhecida"
-# Deliberadamente DIFERENTE de UNKNOWN_ROOM_LABEL, só para
-# cmd_doorway_distribution: "desconhecida" já tem um significado específico
-# no resto do sistema (location_status, por inatividade do beacon - ver
-# app.py/apply_location_status_overrides). Ali, um método sem decisão
-# (aquecimento da persistência, por exemplo) é uma situação diferente - o
-# beacon está ativamente detetado, só o método é que ainda não confirmou
-# sala - usar o mesmo rótulo confundiria as duas no relatório.
+# Deliberadamente diferente de UNKNOWN_ROOM_LABEL: "desconhecida" já
+# significa beacon inativo (location_status, app.py); um método sem decisão
+# com o beacon ativo (ex. aquecimento da persistência) é outra situação.
 NO_DECISION_LABEL = "sem decisão"
 DPI = 300
 
@@ -742,13 +738,10 @@ def cmd_position_table(args):
 # ---------------------------------------------------------------------------
 # Resumo estático/dinâmico (guião novo, protocolo de 75 ensaios)
 # ---------------------------------------------------------------------------
-# Não recalcula nada - só junta duas coisas já calculadas pela cadeia
-# canónica: as métricas de decision_summary_<experiment_id>.csv (accuracy,
-# num_transitions, num_false_movements, latência, ...) com trial_type/
-# trial_position/duração de raw_with_decisions_<experiment_id>.csv (colunas
-# derivadas por analyze_room_decisions.build_detail_dataframe). Escreve um
-# CSV (não uma figura) - o volume esperado (até 75 ensaios x 4 métodos)
-# não cabe bem numa tabela desenhada como as das figuras 1/9.
+# Não recalcula nada - só junta as métricas já em decision_summary com
+# trial_type/trial_position/duração já derivadas em raw_with_decisions.
+# CSV, não figura: até 75 ensaios x 4 métodos não cabe numa tabela desenhada
+# como as das figuras 1/9.
 
 def cmd_trial_type_summary(args):
     warnings = check_consistent_analysis_parameters(args.summary_csv, prefix="decision_summary_")
@@ -788,43 +781,42 @@ def cmd_trial_type_summary(args):
         if args.mac:
             df = df[df["mac"] == args.mac]
 
-        for _, r in df.iterrows():
+        for r in df.itertuples():
             entry = {
                 "experiment_id": experiment_id,
                 "trial_type": info["trial_type"],
                 "trial_position": info["trial_position"],
-                "mac": r["mac"],
-                "method": r["method"],
-                "num_transitions": r.get("num_transitions"),
+                "mac": r.mac,
+                "method": r.method,
+                "num_transitions": r.num_transitions,
             }
             if info["trial_type"] == "static":
                 duration_min = (info["duration_sec"] / 60.0) if info["duration_sec"] else None
                 entry["location_changes_per_min"] = (
-                    r["num_transitions"] / duration_min if duration_min else None
+                    r.num_transitions / duration_min if duration_min else None
                 )
-                num_false = r.get("num_false_movements")
-                # Invariante que TEM de se verificar sempre (nunca uma
-                # igualdade - ver plano): uma falsa mudança é sempre também
-                # uma transição, nunca o contrário. Violar isto é sinal de
-                # bug num dos dois cálculos, não de instabilidade genuína.
-                if pd.notna(num_false) and pd.notna(r["num_transitions"]) and num_false > r["num_transitions"]:
+                num_false = r.num_false_movements
+                # A false movement is always also a transition, never the
+                # reverse - violating this means one of the two counts has
+                # a bug, not that the trial is unusually unstable.
+                if pd.notna(num_false) and pd.notna(r.num_transitions) and num_false > r.num_transitions:
                     invariant_violations.append(
-                        f"{experiment_id} ({r['mac']}, {r['method']}): num_false_movements={num_false} > "
-                        f"num_transitions={r['num_transitions']} - impossível, sinal de bug."
+                        f"{experiment_id} ({r.mac}, {r.method}): num_false_movements={num_false} > "
+                        f"num_transitions={r.num_transitions} - impossível, sinal de bug."
                     )
                 entry["num_false_movements"] = num_false
                 entry["recoveries_to_correct"] = (
-                    (r["num_transitions"] - num_false)
-                    if pd.notna(num_false) and pd.notna(r["num_transitions"]) else None
+                    (r.num_transitions - num_false)
+                    if pd.notna(num_false) and pd.notna(r.num_transitions) else None
                 )
-                entry["accuracy"] = r.get("accuracy")
+                entry["accuracy"] = r.accuracy
             else:  # dynamic
-                entry["accuracy"] = r.get("accuracy")
-                entry["latency_median_sec"] = r.get("latency_median_sec")
-                entry["latency_p95_sec"] = r.get("latency_p95_sec")
-                entry["num_false_movements"] = r.get("num_false_movements")
-                entry["false_movements_per_hour"] = r.get("false_movements_per_hour")
-                entry["missed_movement_rate"] = r.get("missed_movement_rate")
+                entry["accuracy"] = r.accuracy
+                entry["latency_median_sec"] = r.latency_median_sec
+                entry["latency_p95_sec"] = r.latency_p95_sec
+                entry["num_false_movements"] = r.num_false_movements
+                entry["false_movements_per_hour"] = r.false_movements_per_hour
+                entry["missed_movement_rate"] = r.missed_movement_rate
             rows.append(entry)
 
     if invariant_violations:
@@ -844,24 +836,19 @@ def cmd_trial_type_summary(args):
 
 
 # ---------------------------------------------------------------------------
-# Distribuição da sala decidida nas posições de fronteira (P1/P2 - guião
-# novo, pedido do Prof. Carreto após confirmar a exclusão de P1/P2 da
-# exatidão): "preferência sistemática por um dos nós" - revela assimetria
-# de cobertura entre os dois nós de uma soleira, sem depender de ground
-# truth (não existe nessas posições, por desenho). Estruturalmente diferente
-# de cmd_position_table: aquele filtra ground_truth_room.notna() logo à
-# entrada, o que exclui P1/P2 por completo - aqui não há NENHUM filtro de
-# ground truth, o denominador é toda e qualquer deteção nessas posições.
+# Distribuição da sala decidida nas posições de fronteira (P1/P2) - "preferência
+# sistemática por um dos nós", sem depender de ground truth (não existe
+# nessas posições, por desenho). Ao contrário de cmd_position_table (que
+# filtra ground_truth_room.notna() e por isso exclui P1/P2 por completo),
+# aqui não há nenhum filtro de ground truth - o denominador é toda e
+# qualquer deteção nessas posições.
 # ---------------------------------------------------------------------------
 
 def cmd_doorway_distribution(args):
     warnings = check_consistent_analysis_parameters(args.detail_csv, prefix="raw_with_decisions_")
     _print_warnings(warnings, "doorway-distribution")
-    # require_ground_truth=False: P1/P2 nunca têm ground_truth_room - com o
-    # default True, esta verificação filtraria as próprias linhas que
-    # queremos inspecionar antes de olhar para trial_position, e devolveria
-    # sempre "consistente" mesmo faltando o ficheiro de uma repetição
-    # inteira (apanhado em revisão de desenho, não depois como bug silencioso).
+    # require_ground_truth=False - ver check_scenario_consistency, P1/P2
+    # nunca têm ground_truth_room.
     warnings = check_scenario_consistency(
         args.detail_csv, column="trial_position", label="Posições (fronteira)", require_ground_truth=False
     )
@@ -874,11 +861,9 @@ def cmd_doorway_distribution(args):
     if args.mac:
         combined = combined[combined["mac"] == args.mac]
     elif len(macs_present) > 1:
-        # Diferente do padrão mais permissivo de scenario-table/position-table
-        # (que pooliam vários macs em silêncio se --mac fosse omitido): a
-        # pergunta aqui é especificamente sobre a assimetria de UM beacon
-        # entre dois nós - misturar beacons diferentes tornaria o sinal
-        # enganador, por isso --mac passa a ser exigido nesse caso.
+        # Mais estrito que scenario-table/position-table (que pooliam vários
+        # macs em silêncio): misturar beacons diferentes tornaria a pergunta
+        # sobre assimetria de UM beacon enganadora.
         raise SystemExit(f"--mac obrigatório: os ficheiros dados têm vários macs {macs_present}")
 
     if "trial_position" not in combined.columns:
@@ -890,9 +875,6 @@ def cmd_doorway_distribution(args):
         _warn(f"doorway-distribution: nenhuma linha com trial_position em {args.positions} - a saltar.")
         return
 
-    # Mesma reutilização (e mesma ressalva sobre o "n_repetitions_overall>1"
-    # ser global, não por posição) que cmd_position_table já usa - nenhum
-    # filtro de ground_truth_room aqui, ao contrário desse comando.
     n_repetitions_overall = combined["experiment_id"].nunique()
     concentration_by_position = check_scenario_concentration(
         combined, args.concentration_threshold, group_column="trial_position"
@@ -923,13 +905,8 @@ def cmd_doorway_distribution(args):
         info = concentration_by_position.get(position, {})
 
         for method in METHODS:
-            # None/NaN (ex. aquecimento da persistência) fica como a sua
-            # própria categoria, nunca excluído em silêncio do denominador -
-            # mesmo princípio de metrics.build_confusion_counts. Rótulo
-            # NO_DECISION_LABEL, não UNKNOWN_ROOM_LABEL ("desconhecida") -
-            # ver comentário na constante: aqui o beacon está ativo, só o
-            # método é que não decidiu; "desconhecida" no resto do sistema
-            # significa beacon inativo, uma situação diferente.
+            # None/NaN (ex. aquecimento da persistência) é a sua própria
+            # categoria, nunca excluída em silêncio do denominador.
             decided_rooms = pos_df[f"{method}_room"].fillna(NO_DECISION_LABEL)
             n_decided = int((decided_rooms != NO_DECISION_LABEL).sum())
             counts = decided_rooms.value_counts()
@@ -964,12 +941,9 @@ def cmd_doorway_distribution(args):
     out_df.to_csv(csv_path, index=False)
     print(f"Distribuição nas posições de fronteira escrita: {csv_path}")
 
-    # Figura pequena, construída a partir das MESMAS linhas do CSV (nunca
-    # recalculada em separado, para as duas saídas não poderem divergir) -
-    # célula = repartição por sala (pct_of_total primeiro, nunca só
-    # pct_of_decided sozinho - mostrar só a % dos decididos reproduziria em
-    # silêncio o mesmo apagar de "sem decisão" que este ficheiro evita
-    # noutros sítios).
+    # Figura construída a partir das MESMAS linhas do CSV, nunca recalculada
+    # em separado - célula = repartição por sala, pct_of_total primeiro
+    # (mostrar só pct_of_decided esconderia "sem decisão" da vista).
     header = ["Posição"] + [METHOD_LABELS_PT[m].replace("\n", " ") for m in METHODS]
     fig_rows = []
     flagged_rows = {}

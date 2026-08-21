@@ -22,13 +22,10 @@
     sem boot_id dois arranques diferentes podiam parecer duplicados.
 
   Configuracao de aquisicao remota (guiao secção 7):
-  - SCAN_DURATION_SEC/UPLOAD_INTERVAL_MS deixam de estar fixos no codigo -
-    o no vai busca-los UMA VEZ no arranque a NODE_CONFIG_URL (derivado de
-    SERVER_URL por substituicao do caminho, nunca uma constante separada -
-    ver buildNodeConfigUrl()). Se o pedido falhar por qualquer razao (sem
-    rede, backend em baixo, resposta invalida), mantem os valores de
-    fabrica abaixo - nunca bloqueia o arranque. Nao ha nova consulta depois
-    do arranque: uma alteracao so faz efeito apos reiniciar o no.
+  - SCAN_DURATION_SEC/UPLOAD_INTERVAL_MS ja nao estao fixos no codigo - o no
+    vai busca-los uma vez no arranque a NODE_CONFIG_URL (derivado de
+    SERVER_URL, ver buildNodeConfigUrl()), com fallback aos valores de
+    fabrica se o pedido falhar. So faz efeito apos reiniciar o no.
 
   Bibliotecas necessárias (Arduino IDE > Gerir Bibliotecas):
     - ArduinoJson (by Benoit Blanchon), v6.x
@@ -120,21 +117,16 @@ void syncTime(uint32_t timeoutMs) {
   }
 }
 
-// NODE_CONFIG_URL não é uma constante própria - deriva-se de SERVER_URL por
-// substituição do caminho, para que exista só UM IP/porta a editar neste
-// ficheiro. Duas URLs independentes podiam ficar dessincronizadas em
-// silêncio ao mudar de rede (já aconteceu); assim isso é impossível.
+// Deriva-se de SERVER_URL em vez de ser uma constante própria - só um
+// IP/porta a editar no ficheiro, nunca duas URLs a poderem dessincronizar.
 String buildNodeConfigUrl() {
   String url = SERVER_URL;
   url.replace("/api/bledata", "/api/node-config");
   return url;
 }
 
-// Vai buscar a configuração de aquisição (scan_duration_sec/upload_interval_ms)
-// ao backend, uma única vez no arranque (guião secção 7). Falha em qualquer
-// passo (sem rede, HTTP != 200, JSON inválido, campo em falta ou de tipo
-// errado) mantém os valores de fábrica já atribuídos acima - nunca impede
-// o arranque.
+// Falha em qualquer passo (sem rede, HTTP != 200, JSON inválido) mantém os
+// valores de fábrica - nunca impede o arranque.
 void fetchNodeConfig() {
   String url = nodeConfigUrl + "?esp_id=" + ESP_ID;
   HTTPClient http;

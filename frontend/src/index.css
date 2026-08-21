@@ -1,12 +1,7 @@
 /* ==========================================================================
-   Design tokens - single source of truth for the palette/spacing/radius
-   used across the dashboard. Previously these hex values were retyped
-   inline in Sidebar.js/Navbar.js/every page component, with no shared
-   source - which had already caused real, invisible drift (e.g. the
-   sidebar's inline background disagreed with the CSS "aside" rule below,
-   and lost silently to it because of !important; several page cards'
-   inline shadow overrides were losing the same way). Change a value here,
-   it's consistent everywhere.
+   Design tokens - single source of truth for the palette/spacing/radius.
+   Previously retyped inline per-component, which had already caused real
+   drift (an inline background losing silently to an !important CSS rule).
    ========================================================================== */
 :root {
   --color-bg: #f4f7fa;

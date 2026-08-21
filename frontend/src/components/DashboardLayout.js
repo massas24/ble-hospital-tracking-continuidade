@@ -11,7 +11,6 @@ import DetectionHistory from "./DetectionHistory";
 import RequireAuth from "./RequireAuth";
 
 function DashboardLayout() {
- 
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
