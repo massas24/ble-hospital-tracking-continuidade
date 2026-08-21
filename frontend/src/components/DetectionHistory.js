@@ -1,19 +1,10 @@
-// DetectionHistory - searchable detection history with filters by room,
-// beacon, and time interval, plus CSV export (guião secção 3.11:
-// "histórico pesquisável", "filtros por sala, beacon e intervalo
-// temporal", "exportação de dados"). Scoped for ad-hoc filtered look-ups,
-// not a bulk-export replacement for analyze_room_decisions.py.
+
 import { useState, useEffect } from "react";
 import axios from "axios";
 
-// bledata() writes room="unknown" for any esp_id with no esp_mapping entry
-// (backend/app.py) - that literal never shows up in esp_mapping's distinct
-// rooms, so it's added here as a fixed extra option.
+
 const UNKNOWN_ROOM = "unknown";
 
-// datetime-local gives "YYYY-MM-DDTHH:mm" - the backend stores/compares
-// "YYYY-MM-DD HH:MM:SS" strings. ":59" on the end bound (not ":00") so
-// picking e.g. 15:30 as an end time doesn't exclude 15:30:01-15:30:59.
 function toBackendTime(datetimeLocalValue, isEnd) {
   if (!datetimeLocalValue) return "";
   return datetimeLocalValue.replace("T", " ") + (isEnd ? ":59" : ":00");
@@ -81,11 +72,7 @@ export default function DetectionHistory() {
       headers, params: buildParams(), responseType: "blob",
     })
       .then(res => {
-        // Read the truncation signal BEFORE triggering the download, so the
-        // warning shows even though the user's attention moves to the
-        // browser's download UI right after (the filename itself also
-        // carries a "_truncated" suffix as a second, more durable signal -
-        // see backend/app.py).
+        
         if (res.headers["x-export-truncated"] === "true") {
           setExportTruncated(true);
         }

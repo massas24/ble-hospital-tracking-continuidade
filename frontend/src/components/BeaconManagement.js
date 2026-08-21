@@ -1,12 +1,8 @@
-// BeaconManagement component
-// Responsible for displaying active/inactive beacons and sending active beacons to Mirth
+
 
 import { useState, useEffect } from 'react'; // React hooks used in the component
 import Badge from './Badge';
 
-// Maps location_status to a badge tone + display label (guião secção 3.11 -
-// "indicação de localizações ambíguas" was already computed server-side as
-// location_status, just shown as plain text before).
 const STATUS_TONES = {
   confirmada: { tone: 'success', label: 'Confirmada' },
   'em transição': { tone: 'warning', label: 'Em transição' },
@@ -63,37 +59,37 @@ export default function BeaconManagement() {
       });
 
     } catch (err) {
-      // Handle fetch errors and notify user
+      
       console.error('Error loading beacons:', err);
       setMessage('Error loading beacons');
       setMessageType('danger');
     }
   };
 
-  // Sends active beacons to Mirth, but avoids re-sending beacons that are already sent
+
   const sendActiveBeaconsToMirth = async () => {
-    setLoading(true); // show loading UI
+    setLoading(true);
     try {
       const username = localStorage.getItem('username');
       
-      // Determine which active beacons are newly eligible to send
+      
       const newlySentBeacons = {};
       let countToSend = 0;
       let countAlreadySent = 0;
       
       activeBeacons.forEach(beacon => {
-        const beaconKey = `${beacon.mac}_${beacon.room}`; // unique per mac+room
+        const beaconKey = `${beacon.mac}_${beacon.room}`;
         if (sentBeacons[beaconKey]) {
-          // Already sent for this exact location
+          
           countAlreadySent++;
         } else {
-          // Mark as to-be-sent in this request
+          
           newlySentBeacons[beaconKey] = true;
           countToSend++;
         }
       });
       
-      // If nothing to send, show a warning and exit early
+      
       if (countToSend === 0) {
         setMessage(`All ${countAlreadySent} active beacons already sent at current locations`);
         setMessageType('warning');
@@ -102,16 +98,16 @@ export default function BeaconManagement() {
         return;
       }
       
-      // Call backend endpoint that performs the batch send
+      
       const res = await fetch('http://127.0.0.1:5000/api/send-active-beacons-to-mirth', {
         method: 'POST',
         headers: { 'X-User': username }
       });
       const data = await res.json();
       
-      // Update local state and show success/error message depending on response
+      
       if (data.status === 'success') {
-        // Merge new sent keys with existing ones to prevent re-sends
+       
         setSentBeacons(prev => ({ ...prev, ...newlySentBeacons }));
         setMessage('✓ Successfully sent active beacons to Mirth');
         setMessageType('success');
@@ -120,9 +116,9 @@ export default function BeaconManagement() {
         setMessageType('danger');
       }
       
-      setTimeout(() => setMessage(''), 4000); // auto-clear message after a short delay
+      setTimeout(() => setMessage(''), 4000); 
     } catch (err) {
-      // Network or unexpected errors
+      
       setMessage('✗ Error sending beacons to Mirth');
       setMessageType('danger');
       console.error(err);
@@ -132,7 +128,7 @@ export default function BeaconManagement() {
     }
   };
 
-  // Render UI
+  
   return (
     <div className="card p-4 page-card">
       <h2>Beacon Management</h2>
@@ -154,14 +150,7 @@ export default function BeaconManagement() {
         </div>
       )}
 
-      {/* Summary strip (guião 3.11 - "número de beacons ativos"). Deliberately
-          excludes location_status "desconhecida" beacons, unlike the table
-          header below: activeBeacons already includes beacons that stopped
-          reporting more than INACTIVE_TIMEOUT_SEC ago (they just get
-          location_status overridden to "desconhecida" in place, not removed
-          from the list) - "beacons currently present" and "rows in this
-          table" are legitimately different questions, so both numbers are
-          kept, with distinct labels. */}
+      
       {(() => {
         const present = activeBeacons.filter(b => b.location_status !== 'desconhecida');
         const emTransicao = present.filter(b => b.location_status === 'em transição').length;
@@ -190,7 +179,7 @@ export default function BeaconManagement() {
           <tbody>
             {activeBeacons.map((b) => {
               const beaconKey = `${b.mac}_${b.room}`;
-              const isSent = sentBeacons[beaconKey]; // whether this MAC+room was sent
+              const isSent = sentBeacons[beaconKey];
               return (
                 <tr key={b.mac} style={{ backgroundColor: isSent ? '#f0f0f0' : 'transparent' }}>
                   <td>{b.mac}</td>

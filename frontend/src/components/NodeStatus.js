@@ -1,9 +1,4 @@
-// NodeStatus - technical infrastructure status panel (guião secção 3.11:
-// "estado técnico dos nós"). Per esp_id: online/offline (threshold
-// adjustable here, not on the server - see OFFLINE_THRESHOLD_STORAGE_KEY),
-// last communication, detection rate, RSSI health, and lost/duplicate/
-// reordered batch counts, plus a small Mirth Connect delivery status
-// section. Backend: GET /api/node-status.
+
 import { useState, useEffect } from "react";
 import axios from "axios";
 import Badge from "./Badge";

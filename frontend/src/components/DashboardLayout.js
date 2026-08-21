@@ -11,9 +11,7 @@ import DetectionHistory from "./DetectionHistory";
 import RequireAuth from "./RequireAuth";
 
 function DashboardLayout() {
-  // Only affects layout below the 768px breakpoint (index.css) - the
-  // sidebar is an always-visible fixed column above that, this state is
-  // simply unused visually until the viewport is narrow enough to matter.
+ 
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (

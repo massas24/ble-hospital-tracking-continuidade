@@ -57,6 +57,14 @@ METHOD_LABELS_PT = {
     "median_hysteresis_persistence": "Método\ncombinado",
 }
 UNKNOWN_ROOM_LABEL = "desconhecida"
+# Deliberadamente DIFERENTE de UNKNOWN_ROOM_LABEL, só para
+# cmd_doorway_distribution: "desconhecida" já tem um significado específico
+# no resto do sistema (location_status, por inatividade do beacon - ver
+# app.py/apply_location_status_overrides). Ali, um método sem decisão
+# (aquecimento da persistência, por exemplo) é uma situação diferente - o
+# beacon está ativamente detetado, só o método é que ainda não confirmou
+# sala - usar o mesmo rótulo confundiria as duas no relatório.
+NO_DECISION_LABEL = "sem decisão"
 DPI = 300
 
 
@@ -836,6 +844,186 @@ def cmd_trial_type_summary(args):
 
 
 # ---------------------------------------------------------------------------
+# Distribuição da sala decidida nas posições de fronteira (P1/P2 - guião
+# novo, pedido do Prof. Carreto após confirmar a exclusão de P1/P2 da
+# exatidão): "preferência sistemática por um dos nós" - revela assimetria
+# de cobertura entre os dois nós de uma soleira, sem depender de ground
+# truth (não existe nessas posições, por desenho). Estruturalmente diferente
+# de cmd_position_table: aquele filtra ground_truth_room.notna() logo à
+# entrada, o que exclui P1/P2 por completo - aqui não há NENHUM filtro de
+# ground truth, o denominador é toda e qualquer deteção nessas posições.
+# ---------------------------------------------------------------------------
+
+def cmd_doorway_distribution(args):
+    warnings = check_consistent_analysis_parameters(args.detail_csv, prefix="raw_with_decisions_")
+    _print_warnings(warnings, "doorway-distribution")
+    # require_ground_truth=False: P1/P2 nunca têm ground_truth_room - com o
+    # default True, esta verificação filtraria as próprias linhas que
+    # queremos inspecionar antes de olhar para trial_position, e devolveria
+    # sempre "consistente" mesmo faltando o ficheiro de uma repetição
+    # inteira (apanhado em revisão de desenho, não depois como bug silencioso).
+    warnings = check_scenario_consistency(
+        args.detail_csv, column="trial_position", label="Posições (fronteira)", require_ground_truth=False
+    )
+    _print_warnings(warnings, "doorway-distribution")
+
+    frames = [pd.read_csv(p) for p in args.detail_csv]
+    combined = pd.concat(frames, ignore_index=True)
+
+    macs_present = sorted(combined["mac"].dropna().unique())
+    if args.mac:
+        combined = combined[combined["mac"] == args.mac]
+    elif len(macs_present) > 1:
+        # Diferente do padrão mais permissivo de scenario-table/position-table
+        # (que pooliam vários macs em silêncio se --mac fosse omitido): a
+        # pergunta aqui é especificamente sobre a assimetria de UM beacon
+        # entre dois nós - misturar beacons diferentes tornaria o sinal
+        # enganador, por isso --mac passa a ser exigido nesse caso.
+        raise SystemExit(f"--mac obrigatório: os ficheiros dados têm vários macs {macs_present}")
+
+    if "trial_position" not in combined.columns:
+        _warn("doorway-distribution: coluna 'trial_position' ausente (dados anteriores à convenção EST-/DIN-) - a saltar.")
+        return
+
+    combined = combined[combined["trial_position"].isin(args.positions)]
+    if combined.empty:
+        _warn(f"doorway-distribution: nenhuma linha com trial_position em {args.positions} - a saltar.")
+        return
+
+    # Mesma reutilização (e mesma ressalva sobre o "n_repetitions_overall>1"
+    # ser global, não por posição) que cmd_position_table já usa - nenhum
+    # filtro de ground_truth_room aqui, ao contrário desse comando.
+    n_repetitions_overall = combined["experiment_id"].nunique()
+    concentration_by_position = check_scenario_concentration(
+        combined, args.concentration_threshold, group_column="trial_position"
+    )
+    if n_repetitions_overall > 1:
+        for position, info in concentration_by_position.items():
+            if info["concentrated"]:
+                _warn(
+                    f"[doorway-distribution] Posição {position!r}: {info['by_experiment'][info['dominant_experiment']]}/"
+                    f"{info['total']} ({info['max_share'] * 100:.1f}%) vêm de uma única repetição "
+                    f"({info['dominant_experiment']}) - distribuição: {info['by_experiment']}"
+                )
+
+    positions = sorted(set(args.positions) & set(combined["trial_position"].unique()))
+    rows = []
+    position_flags = {}  # position -> "low_n" | "concentrated" | "both" | None
+    for position in positions:
+        pos_df = combined[combined["trial_position"] == position]
+        total_n = len(pos_df)
+        low_n = 0 < total_n < args.min_observations
+        concentrated = n_repetitions_overall > 1 and concentration_by_position.get(position, {}).get("concentrated", False)
+        if low_n and concentrated:
+            position_flags[position] = "both"
+        elif low_n:
+            position_flags[position] = "low_n"
+        elif concentrated:
+            position_flags[position] = "concentrated"
+        info = concentration_by_position.get(position, {})
+
+        for method in METHODS:
+            # None/NaN (ex. aquecimento da persistência) fica como a sua
+            # própria categoria, nunca excluído em silêncio do denominador -
+            # mesmo princípio de metrics.build_confusion_counts. Rótulo
+            # NO_DECISION_LABEL, não UNKNOWN_ROOM_LABEL ("desconhecida") -
+            # ver comentário na constante: aqui o beacon está ativo, só o
+            # método é que não decidiu; "desconhecida" no resto do sistema
+            # significa beacon inativo, uma situação diferente.
+            decided_rooms = pos_df[f"{method}_room"].fillna(NO_DECISION_LABEL)
+            n_decided = int((decided_rooms != NO_DECISION_LABEL).sum())
+            counts = decided_rooms.value_counts()
+            for decided_room, n in counts.items():
+                n = int(n)
+                rows.append({
+                    "trial_position": position,
+                    "method": method,
+                    "decided_room": decided_room,
+                    "n": n,
+                    "total_n": total_n,
+                    "pct_of_total": (n / total_n * 100.0) if total_n else None,
+                    "n_decided": n_decided,
+                    "pct_of_decided": (n / n_decided * 100.0) if (n_decided and decided_room != NO_DECISION_LABEL) else None,
+                    "low_n": low_n,
+                    "concentrated": concentrated,
+                    "dominant_experiment_id": info.get("dominant_experiment"),
+                    "dominant_experiment_share": info.get("max_share"),
+                })
+
+    if not rows:
+        _warn("doorway-distribution: nada para reportar.")
+        return
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    csv_path = os.path.join(args.output_dir, f"distribuicao_fronteira_{args.label}.csv")
+    out_df = pd.DataFrame(rows, columns=[
+        "trial_position", "method", "decided_room", "n", "total_n", "pct_of_total",
+        "n_decided", "pct_of_decided", "low_n", "concentrated",
+        "dominant_experiment_id", "dominant_experiment_share",
+    ])
+    out_df.to_csv(csv_path, index=False)
+    print(f"Distribuição nas posições de fronteira escrita: {csv_path}")
+
+    # Figura pequena, construída a partir das MESMAS linhas do CSV (nunca
+    # recalculada em separado, para as duas saídas não poderem divergir) -
+    # célula = repartição por sala (pct_of_total primeiro, nunca só
+    # pct_of_decided sozinho - mostrar só a % dos decididos reproduziria em
+    # silêncio o mesmo apagar de "sem decisão" que este ficheiro evita
+    # noutros sítios).
+    header = ["Posição"] + [METHOD_LABELS_PT[m].replace("\n", " ") for m in METHODS]
+    fig_rows = []
+    flagged_rows = {}
+    for row_idx, position in enumerate(positions):
+        flag = position_flags.get(position)
+        if flag:
+            flagged_rows[row_idx] = flag
+        pos_total = out_df.loc[out_df["trial_position"] == position, "total_n"].iloc[0]
+        label_marker = ("*" if flag in ("low_n", "both") else "") + ("†" if flag in ("concentrated", "both") else "")
+        row_label = f"{position} (n={pos_total})" + (f" {label_marker}" if label_marker else "")
+        row = [row_label]
+        for method in METHODS:
+            method_rows = out_df[(out_df["trial_position"] == position) & (out_df["method"] == method)]
+            method_rows = method_rows.sort_values("pct_of_total", ascending=False)
+            cell = "\n".join(f"{r.decided_room}: {r.pct_of_total:.0f}%" for r in method_rows.itertuples())
+            row.append(cell if cell else "sem dados")
+        fig_rows.append(row)
+
+    fig, ax = plt.subplots(figsize=(11, 2.2 + 0.9 * len(fig_rows)))
+    ax.axis("off")
+    table = ax.table(cellText=fig_rows, colLabels=header, loc="center", cellLoc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.auto_set_column_width(col=list(range(len(header))))
+    table.scale(1, 2.4)
+
+    flag_colors = {"low_n": LOW_N_COLOR, "concentrated": CONCENTRATED_COLOR, "both": BOTH_FLAGS_COLOR}
+    for row_idx, flag in flagged_rows.items():
+        for col in range(len(header)):
+            table[(row_idx + 1, col)].set_facecolor(flag_colors[flag])
+
+    ax.set_title("Distribuição da sala decidida nas posições de fronteira (% do total de deteções)")
+    footnote_lines = [
+        "Sem ground truth nestas posições - percentagens sobre o total de deteções, não exatidão.",
+        "\"Sem decisão\": o método ainda não confirmou sala nesta deteção (ex: aquecimento da persistência) - "
+        "o beacon estava ativo e a ser detetado; não é o mesmo que o estado \"desconhecida\" do dashboard "
+        "(esse é por inatividade do beacon).",
+    ]
+    if any(f in ("low_n", "both") for f in flagged_rows.values()):
+        footnote_lines.append(
+            f"* menos de {args.min_observations} observações - convenção para sinalizar poucas "
+            "observações, não um critério de validade estatística."
+        )
+    if any(f in ("concentrated", "both") for f in flagged_rows.values()):
+        footnote_lines.append(
+            f"† mais de {args.concentration_threshold * 100:.0f}% das observações vêm de uma única "
+            "repetição - célula não genuinamente agregada; ver consola para a distribuição completa."
+        )
+    fig.text(0.5, 0.01, "\n".join(footnote_lines), ha="center", fontsize=9, color="#555555")
+
+    _savefig(fig, os.path.join(args.output_dir, f"tabela_fronteira_{args.label}.png"))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -921,6 +1109,17 @@ def main():
     p11.add_argument("--detail-csv", nargs="+", required=True, help="um ou mais raw_with_decisions_<label>.csv com trial_type/trial_position")
     add_common(p11)
     p11.set_defaults(func=cmd_trial_type_summary)
+
+    p12 = sub.add_parser("doorway-distribution",
+                          help="Distribuição da sala decidida por método nas posições de fronteira (P1/P2, sem ground truth)")
+    p12.add_argument("--detail-csv", nargs="+", required=True, help="um ou mais raw_with_decisions_<label>.csv")
+    p12.add_argument("--positions", nargs="+", default=["P1", "P2"], help="posições de fronteira a analisar (default: P1 P2)")
+    p12.add_argument("--min-observations", type=int, default=30,
+                      help="abaixo disto, a posição fica marcada com * (default: 30)")
+    p12.add_argument("--concentration-threshold", type=float, default=0.5,
+                      help="fração acima da qual uma única repetição a dominar a posição marca a linha com † (default: 0.5)")
+    add_common(p12)
+    p12.set_defaults(func=cmd_doorway_distribution)
 
     args = parser.parse_args()
     args.func(args)

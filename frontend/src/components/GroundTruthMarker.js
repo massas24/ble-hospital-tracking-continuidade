@@ -1,7 +1,4 @@
-// GroundTruthMarker - mobile-friendly page for tapping "I am now in room X"
-// while physically walking around with a beacon, away from the laptop.
-// Rendered as a top-level route (see App.js), outside DashboardLayout, so it
-// doesn't inherit the fixed-sidebar desktop layout.
+
 import { useState, useEffect } from "react";
 import axios from "axios";
 
@@ -13,10 +10,6 @@ const SCENARIOS = [
 ];
 const SCENARIO_LABELS = Object.fromEntries(SCENARIOS.map(s => [s.value, s.label]));
 
-// Acima disto (minutos), o indicador de ensaio ativo passa de verde a
-// laranja - um ensaio esquecido agora sobrevive a reinícios do backend e a
-// dias inteiros (ver README), por isso isto é o que o torna preventivo em
-// vez de só informativo.
 const STALE_EXPERIMENT_THRESHOLD_MIN = 120;
 
 function suggestExperimentName() {
@@ -25,12 +18,6 @@ function suggestExperimentName() {
   return `ensaio_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}`;
 }
 
-// Só formata um número de minutos já calculado pelo SERVIDOR
-// (experiment_elapsed_min) - nunca faz aritmética de datas aqui. O
-// telemóvel e o servidor não partilham necessariamente o mesmo relógio, e
-// este projeto já confirmou que o serviço de hora do Windows pode estar
-// parado na máquina do servidor - qualquer comparação feita no browser
-// entre Date.now() e um timestamp do servidor não seria fiável.
 function formatElapsed(elapsedMin) {
   if (elapsedMin == null) return null;
   const rounded = Math.round(elapsedMin);
@@ -97,11 +84,7 @@ function GroundTruthMarker() {
       })
       .catch(() => setRooms([]));
 
-    // "ativo há X min" e o limiar de laranja só têm sentido se forem
-    // razoavelmente atuais - como experiment_elapsed_min vem sempre do
-    // servidor (nunca de um relógio local), a única forma correta de os
-    // manter atualizados é voltar a perguntar ao servidor de vez em
-    // quando, não inferir localmente.
+    
     const interval = setInterval(refreshExperimentStatus, 60000);
     return () => clearInterval(interval);
   }, []);
@@ -132,9 +115,7 @@ function GroundTruthMarker() {
       setExperimentElapsedMin(res.data.experiment_elapsed_min);
       setShowStartForm(false);
       setNewExperimentName("");
-      // Populado quando este arranque substituiu um ensaio ativo (ver
-      // backend); null num arranque limpo - qualquer dos dois casos deve
-      // substituir/limpar o painel anterior.
+      
       setEndedSummary(res.data.ended_summary || null);
       fetchRecentExperiments();
     } catch (err) {

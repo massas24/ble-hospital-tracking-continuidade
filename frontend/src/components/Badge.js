@@ -1,7 +1,4 @@
-// Small shared Bootstrap-badge wrapper - single place to map a semantic
-// "tone" to Bootstrap's badge color classes. Previously NodeStatus and
-// BeaconManagement each hand-rolled their own near-identical badge
-// component/color-mapping independently.
+
 const TONE_CLASSES = {
   success: "bg-success",
   warning: "bg-warning text-dark",

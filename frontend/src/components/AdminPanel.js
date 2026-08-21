@@ -6,20 +6,17 @@ const EMPTY_FORM = { esp_id: "", room: "", scan_duration_sec: "", upload_interva
 function AdminPanel() {
   const [mappings, setMappings] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
-  const [message, setMessage] = useState(null); // { type: "success" | "danger", text }
-  const [defaults, setDefaults] = useState(null); // { scan_duration_sec, upload_interval_ms } - resolved global defaults
+  const [message, setMessage] = useState(null);
+  const [defaults, setDefaults] = useState(null);
   const username = localStorage.getItem("username");
 
-  // Fetch mappings on component mount and when username changes
+  
   useEffect(() => {
     if (!username) return;
     axios.get("/api/esp-mapping", { headers: { "X-User": username } })
       .then(res => setMappings(res.data))
       .catch(console.error);
-    // GET /api/node-config with no esp_id resolves straight to the global
-    // defaults (guião secção 7) - the same call a node itself makes at
-    // boot for an esp_id with no override. Fetched once so the "padrão"
-    // cells below can show the actual number, not just the bare word.
+    
     axios.get("/api/node-config")
       .then(res => setDefaults({
         scan_duration_sec: res.data.scan_duration_sec,
@@ -33,9 +30,7 @@ function AdminPanel() {
     setMappings(res.data);
   };
 
-  // Add/update mapping. Room is only required the first time an esp_id is
-  // registered (mirrors the backend's own rule) - so an already-mapped node
-  // can have just its scan config changed without retyping its room.
+  
   const addMapping = async () => {
     setMessage(null);
     const espId = form.esp_id.trim();
@@ -54,10 +49,6 @@ function AdminPanel() {
     const payload = { esp_id: espId };
     if (room) payload.room = room;
 
-    // scan_duration_sec/upload_interval_ms (guião secção 7) are optional -
-    // only sent when filled in, and validated client-side first so a typo
-    // doesn't need a round trip to discover (the backend re-validates the
-    // same rule regardless, this is just a faster echo of it).
     for (const [field, label] of [
       ["scan_duration_sec", "Scan Duration (s)"],
       ["upload_interval_ms", "Upload Interval (ms)"],
@@ -76,25 +67,20 @@ function AdminPanel() {
       const res = await axios.post("/api/esp-mapping", payload, { headers: { "X-User": username } });
       await refreshMappings();
       setForm(EMPTY_FORM);
-      // The backend adds a "reinicia para aplicar" note whenever scan
-      // config actually changed - surface it verbatim when present, since
-      // it's the easiest place to miss that the change isn't live yet.
       setMessage({ type: "success", text: res.data.note || "Mapeamento guardado." });
     } catch (err) {
       setMessage({ type: "danger", text: err.response?.data?.error || "Failed to add mapping" });
     }
   };
 
-  // Delete mapping
+
   const deleteMapping = async (esp_id) => {
     setMessage(null);
     try {
       await axios.delete(`/api/delete-room/${esp_id}`, { headers: { "X-User": username } });
       setMappings(mappings.filter(m => m.esp_id !== esp_id));
     } catch (err) {
-      // Surfaces the backend's real reason (e.g. blocked because a trial is
-      // active) instead of a generic message - the same 409 guard the
-      // config fields above are already subject to.
+      
       setMessage({ type: "danger", text: err.response?.data?.error || "Failed to delete mapping" });
     }
   };

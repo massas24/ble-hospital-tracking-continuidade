@@ -21,9 +21,7 @@ const NAV_SECTIONS = [
   },
 ];
 
-// `open`/`onNavigate` only matter on mobile (off-canvas drawer, see
-// index.css's max-width:768px block) - on desktop the sidebar is always
-// visible regardless of `open`, and onNavigate is harmless to call.
+
 export default function Sidebar({ open, onNavigate }) {
   const location = useLocation();
 

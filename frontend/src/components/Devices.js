@@ -1,13 +1,13 @@
-// Import React hooks and axios for API calls
+
 import { useState, useEffect } from "react";
 import axios from "axios";
 
-// Devices component shows live BLE device data
-function Devices() {
-  const [devices, setDevices] = useState([]); // Store device list
-  const username = localStorage.getItem("username"); // Get username from local storage
 
-  // Fetch devices from backend every second
+function Devices() {
+  const [devices, setDevices] = useState([]);
+  const username = localStorage.getItem("username");
+
+
   useEffect(() => {
     const interval = setInterval(() => {
       axios.get("/api/data", { headers: { "X-User": username } })
@@ -17,7 +17,7 @@ function Devices() {
     return () => clearInterval(interval);
   }, [username]);
 
-  // Render device table
+
   return (
     <div className="card p-4 page-card-wide">
       <h2>Live BLE Devices</h2>

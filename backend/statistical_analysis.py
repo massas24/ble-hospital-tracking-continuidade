@@ -418,7 +418,7 @@ def check_room_consistency(confusion_csv_paths):
     ]
 
 
-def check_scenario_consistency(detail_csv_paths, column="ground_truth_scenario", label="Cenários"):
+def check_scenario_consistency(detail_csv_paths, column="ground_truth_scenario", label="Cenários", require_ground_truth=True):
     """Compares the set of distinct values of `column` across
     raw_with_decisions_<label>.csv files being aggregated for a per-group
     accuracy table - default column/label match figure 9's per-scenario
@@ -433,6 +433,19 @@ def check_scenario_consistency(detail_csv_paths, column="ground_truth_scenario",
     the REPETITION SET, not an error about any single repetition - a trial
     missing one scenario/position is still valid for its others.
 
+    require_ground_truth (default True, matches original behaviour):
+    whether a row must also have ground_truth_room set to count towards
+    `column`'s distinct values. Correct for ground_truth_scenario/
+    trial_position-when-accuracy-relevant (both only meaningful alongside a
+    real ground truth room, see cmd_scenario_table/cmd_position_table) but
+    WRONG for trial_position at the P1/P2 doorway positions, which have no
+    ground truth by design (see remote-config plan, guião novo secção 5) -
+    with the default True, EVERY P1/P2 row would be filtered out before
+    `column` is ever inspected, silently reporting "consistent" even if an
+    entire repetition's file were missing. cmd_doorway_distribution passes
+    require_ground_truth=False for exactly this reason - caught in design
+    review before shipping, not found later as a silent false negative.
+
     Older/synthetic CSVs (e.g. from simulate_metrics_trial.py, predating
     scenario tagging, or any CSV predating the EST-/DIN- position
     convention) may be missing `column` entirely, not just empty - treated
@@ -444,8 +457,8 @@ def check_scenario_consistency(detail_csv_paths, column="ground_truth_scenario",
         if column not in df.columns:
             values_by_path[path] = set()
             continue
-        gt = df[df["ground_truth_room"].notna()]
-        values_by_path[path] = set(gt[column].dropna().unique())
+        sub = df[df["ground_truth_room"].notna()] if require_ground_truth else df
+        values_by_path[path] = set(sub[column].dropna().unique())
 
     all_values = set()
     common_values = None
