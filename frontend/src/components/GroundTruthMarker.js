@@ -257,20 +257,22 @@ function GroundTruthMarker() {
           {endedSummary.macs.length === 0 ? (
             <p className="text-muted mb-0">Sem dados registados neste ensaio.</p>
           ) : (
-            <table className="table table-sm mb-0">
-              <thead><tr><th>MAC</th><th>Deteções</th><th>Eventos GT</th><th>Transições</th><th>Duração</th></tr></thead>
-              <tbody>
-                {endedSummary.macs.map(m => (
-                  <tr key={m.mac}>
-                    <td>{m.mac}</td>
-                    <td>{m.num_raw_detections}</td>
-                    <td>{m.num_ground_truth_events}</td>
-                    <td>{m.num_transitions}</td>
-                    <td>{m.duration_sec != null ? `${Math.round(m.duration_sec)}s` : "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="table-responsive">
+              <table className="table table-sm mb-0">
+                <thead><tr><th>MAC</th><th>Deteções</th><th>Eventos GT</th><th>Transições</th><th>Duração</th></tr></thead>
+                <tbody>
+                  {endedSummary.macs.map(m => (
+                    <tr key={m.mac}>
+                      <td>{m.mac}</td>
+                      <td>{m.num_raw_detections}</td>
+                      <td>{m.num_ground_truth_events}</td>
+                      <td>{m.num_transitions}</td>
+                      <td>{m.duration_sec != null ? `${Math.round(m.duration_sec)}s` : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

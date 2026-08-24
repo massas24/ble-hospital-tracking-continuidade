@@ -133,42 +133,44 @@ function AdminPanel() {
         </small>
         <button onClick={addMapping} className="btn btn-primary">Add Mapping</button>
       </div>
-      <table className="table table-striped">
-        <thead>
-          <tr>
-            <th>ESP ID</th>
-            <th>Room</th>
-            <th>Scan (s)</th>
-            <th>Upload (ms)</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {mappings.length ? (
-            mappings.map((m, idx) => (
-              <tr key={idx}>
-                <td>{m.esp_id}</td>
-                <td>{m.room || <span className="text-muted">&mdash;</span>}</td>
-                <td>{m.scan_duration_sec ?? (
-                  <span className="text-muted">padrão{defaults ? ` (${defaults.scan_duration_sec}s)` : ""}</span>
-                )}</td>
-                <td>{m.upload_interval_ms ?? (
-                  <span className="text-muted">padrão{defaults ? ` (${defaults.upload_interval_ms}ms)` : ""}</span>
-                )}</td>
-                <td>
-                  <button onClick={() => deleteMapping(m.esp_id)} className="btn btn-danger btn-sm">
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))
-          ) : (
+      <div className="table-responsive">
+        <table className="table table-striped">
+          <thead>
             <tr>
-              <td colSpan="5" className="text-center">No mappings yet</td>
+              <th>ESP ID</th>
+              <th>Room</th>
+              <th>Scan (s)</th>
+              <th>Upload (ms)</th>
+              <th>Action</th>
             </tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {mappings.length ? (
+              mappings.map((m, idx) => (
+                <tr key={idx}>
+                  <td>{m.esp_id}</td>
+                  <td>{m.room || <span className="text-muted">&mdash;</span>}</td>
+                  <td>{m.scan_duration_sec ?? (
+                    <span className="text-muted">padrão{defaults ? ` (${defaults.scan_duration_sec}s)` : ""}</span>
+                  )}</td>
+                  <td>{m.upload_interval_ms ?? (
+                    <span className="text-muted">padrão{defaults ? ` (${defaults.upload_interval_ms}ms)` : ""}</span>
+                  )}</td>
+                  <td>
+                    <button onClick={() => deleteMapping(m.esp_id)} className="btn btn-danger btn-sm">
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan="5" className="text-center">No mappings yet</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

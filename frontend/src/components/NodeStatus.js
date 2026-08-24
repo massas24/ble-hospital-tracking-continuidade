@@ -89,36 +89,38 @@ export default function NodeStatus() {
       </p>
 
       {nodes.length > 0 ? (
-        <table className="table table-striped mb-4">
-          <thead>
-            <tr>
-              <th>ESP ID</th>
-              <th>Sala</th>
-              <th>Estado</th>
-              <th>Última comunicação</th>
-              <th>Deteções/min</th>
-              <th>RSSI mediano (dBm)</th>
-              <th>Lotes perdidos</th>
-              <th>Lotes duplicados</th>
-              <th>Reordenados</th>
-            </tr>
-          </thead>
-          <tbody>
-            {nodes.map((n) => (
-              <tr key={n.esp_id}>
-                <td>{n.esp_id}</td>
-                <td>{n.room || <span className="text-muted fst-italic">não mapeado</span>}</td>
-                <td><OnlineBadge secondsSinceLastSeen={n.seconds_since_last_seen} thresholdSec={offlineThreshold} /></td>
-                <td>{n.last_seen || "-"} {n.last_seen && `(há ${formatSeconds(n.seconds_since_last_seen)})`}</td>
-                <td>{n.detections_per_min}</td>
-                <td>{n.median_rssi_dbm != null ? n.median_rssi_dbm : "-"}</td>
-                <td>{n.gap_count}</td>
-                <td>{n.duplicate_count}</td>
-                <td>{n.reorder_count}</td>
+        <div className="table-responsive">
+          <table className="table table-striped mb-4">
+            <thead>
+              <tr>
+                <th>ESP ID</th>
+                <th>Sala</th>
+                <th>Estado</th>
+                <th>Última comunicação</th>
+                <th>Deteções/min</th>
+                <th>RSSI mediano (dBm)</th>
+                <th>Lotes perdidos</th>
+                <th>Lotes duplicados</th>
+                <th>Reordenados</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {nodes.map((n) => (
+                <tr key={n.esp_id}>
+                  <td>{n.esp_id}</td>
+                  <td>{n.room || <span className="text-muted fst-italic">não mapeado</span>}</td>
+                  <td><OnlineBadge secondsSinceLastSeen={n.seconds_since_last_seen} thresholdSec={offlineThreshold} /></td>
+                  <td>{n.last_seen || "-"} {n.last_seen && `(há ${formatSeconds(n.seconds_since_last_seen)})`}</td>
+                  <td>{n.detections_per_min}</td>
+                  <td>{n.median_rssi_dbm != null ? n.median_rssi_dbm : "-"}</td>
+                  <td>{n.gap_count}</td>
+                  <td>{n.duplicate_count}</td>
+                  <td>{n.reorder_count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <p className="text-muted fst-italic">Nenhum nó configurado ou visto ainda</p>
       )}

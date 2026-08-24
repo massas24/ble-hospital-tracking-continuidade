@@ -143,28 +143,30 @@ export default function DetectionHistory() {
       )}
 
       {results.length > 0 ? (
-        <table className="table table-striped">
-          <thead>
-            <tr>
-              <th>Hora</th>
-              <th>MAC</th>
-              <th>Sala</th>
-              <th>ESP ID</th>
-              <th>RSSI</th>
-            </tr>
-          </thead>
-          <tbody>
-            {results.map((r, idx) => (
-              <tr key={idx}>
-                <td>{r.time}</td>
-                <td>{r.mac}</td>
-                <td>{r.room}</td>
-                <td>{r.esp_id}</td>
-                <td>{r.rssi}</td>
+        <div className="table-responsive">
+          <table className="table table-striped">
+            <thead>
+              <tr>
+                <th>Hora</th>
+                <th>MAC</th>
+                <th>Sala</th>
+                <th>ESP ID</th>
+                <th>RSSI</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {results.map((r, idx) => (
+                <tr key={idx}>
+                  <td>{r.time}</td>
+                  <td>{r.mac}</td>
+                  <td>{r.room}</td>
+                  <td>{r.esp_id}</td>
+                  <td>{r.rssi}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <p className="text-muted fst-italic">Sem resultados - ajusta os filtros e pesquisa.</p>
       )}

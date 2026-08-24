@@ -51,38 +51,40 @@ function WhitelistAdmin() {
         <button onClick={addMac} className="btn btn-primary">Add MAC</button>
       </div>
       {error && <div className="text-danger mb-3">{error}</div>}
-      <table className="table table-striped">
-        <thead>
-          <tr>
-            <th>MAC Address</th>
-            <th>Action</th>
-            <th>History</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.length === 0 ? (
+      <div className="table-responsive">
+        <table className="table table-striped">
+          <thead>
             <tr>
-              <td colSpan="3" className="text-center">No MACs in whitelist</td>
+              <th>MAC Address</th>
+              <th>Action</th>
+              <th>History</th>
             </tr>
-          ) : (
-            items.map(item => (
-              <tr key={item.mac}>
-                <td>{item.mac}</td>
-                <td>
-                  <button onClick={() => deleteMac(item.mac)} className="btn btn-danger btn-sm">
-                    Delete
-                  </button>
-                </td>
-                <td>
-                  <button onClick={() => setSelectedMac(item.mac)} className="btn btn-info btn-sm">
-                    View History
-                  </button>
-                </td>
+          </thead>
+          <tbody>
+            {items.length === 0 ? (
+              <tr>
+                <td colSpan="3" className="text-center">No MACs in whitelist</td>
               </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+            ) : (
+              items.map(item => (
+                <tr key={item.mac}>
+                  <td>{item.mac}</td>
+                  <td>
+                    <button onClick={() => deleteMac(item.mac)} className="btn btn-danger btn-sm">
+                      Delete
+                    </button>
+                  </td>
+                  <td>
+                    <button onClick={() => setSelectedMac(item.mac)} className="btn btn-info btn-sm">
+                      View History
+                    </button>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {/* Render BeaconHistoryTable when a MAC is selected */}
       {selectedMac && <BeaconHistoryTable mac={selectedMac} token={username} />}

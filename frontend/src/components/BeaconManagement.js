@@ -165,34 +165,36 @@ export default function BeaconManagement() {
       {/* Active beacons table */}
       <h3>Active Beacons ({activeBeacons.length})</h3>
       {activeBeacons.length > 0 ? (
-        <table className="table table-striped mb-4">
-          <thead>
-            <tr>
-              <th>MAC Address</th>
-              <th>Room</th>
-              <th>RSSI</th>
-              <th>Last Seen</th>
-              <th>Location Status</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {activeBeacons.map((b) => {
-              const beaconKey = `${b.mac}_${b.room}`;
-              const isSent = sentBeacons[beaconKey];
-              return (
-                <tr key={b.mac} style={{ backgroundColor: isSent ? '#f0f0f0' : 'transparent' }}>
-                  <td>{b.mac}</td>
-                  <td>{b.room}</td>
-                  <td>{b.rssi}</td>
-                  <td>{b.time}</td>
-                  <td><StatusBadge status={b.location_status} /></td>
-                  <td>{isSent ? '✓ Sent' : 'Pending'}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="table-responsive">
+          <table className="table table-striped mb-4">
+            <thead>
+              <tr>
+                <th>MAC Address</th>
+                <th>Room</th>
+                <th>RSSI</th>
+                <th>Last Seen</th>
+                <th>Location Status</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeBeacons.map((b) => {
+                const beaconKey = `${b.mac}_${b.room}`;
+                const isSent = sentBeacons[beaconKey];
+                return (
+                  <tr key={b.mac} style={{ backgroundColor: isSent ? '#f0f0f0' : 'transparent' }}>
+                    <td>{b.mac}</td>
+                    <td>{b.room}</td>
+                    <td>{b.rssi}</td>
+                    <td>{b.time}</td>
+                    <td><StatusBadge status={b.location_status} /></td>
+                    <td>{isSent ? '✓ Sent' : 'Pending'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <p className="text-muted fst-italic">No active beacons</p>
       )}
@@ -200,22 +202,24 @@ export default function BeaconManagement() {
       {/* Inactive (whitelisted) beacons table */}
       <h3>Inactive Beacons ({inactiveBeacons.length})</h3>
       {inactiveBeacons.length > 0 ? (
-        <table className="table table-striped">
-          <thead>
-            <tr>
-              <th>MAC Address</th>
-              <th>Whitelisted On</th>
-            </tr>
-          </thead>
-          <tbody>
-            {inactiveBeacons.map((b) => (
-              <tr key={b.mac}>
-                <td>{b.mac}</td>
-                <td>{b.added_at}</td>
+        <div className="table-responsive">
+          <table className="table table-striped">
+            <thead>
+              <tr>
+                <th>MAC Address</th>
+                <th>Whitelisted On</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {inactiveBeacons.map((b) => (
+                <tr key={b.mac}>
+                  <td>{b.mac}</td>
+                  <td>{b.added_at}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <p className="text-muted fst-italic">No inactive beacons</p>
       )}

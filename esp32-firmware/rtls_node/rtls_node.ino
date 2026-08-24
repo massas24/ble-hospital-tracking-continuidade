@@ -48,12 +48,12 @@ const char* WIFI_PASSWORD = "";
 
 // IP do portátil onde o Flask corre, na mesma rede WiFi do ESP32, porta 5000.
 // Descobre com "ipconfig" no PowerShell (adaptador Wi-Fi, endereço IPv4).
-const char* SERVER_URL    = "http://172.29.128.226:5000/api/bledata";
+const char* SERVER_URL    = "http://172.29.132.20:5000/api/bledata";
 
 // Identificador único deste nó - tem de coincidir, carácter a carácter, com
 // o esp_id que registares no mapeamento de salas (dashboard ou
 // POST /api/esp-mapping). Ex: "ESP-101".
-const char* ESP_ID        = "ESP-01";
+const char* ESP_ID        = "ESP-02";
 
 // Duração de cada scan BLE, em segundos - valor de fábrica, substituído no
 // arranque pelo que vier de GET /api/node-config (ver fetchNodeConfig()).
