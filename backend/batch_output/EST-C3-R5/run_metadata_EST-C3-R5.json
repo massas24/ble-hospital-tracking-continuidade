@@ -1,0 +1,108 @@
+{
+  "run_timestamp": "2026-08-25 14:26:32",
+  "experiment_id_filter": "EST-C3-R5",
+  "mac_filter": [
+    "c3:00:00:13:3b:b7"
+  ],
+  "resolved_macs": [
+    "c3:00:00:13:3b:b7"
+  ],
+  "analysis_parameters": {
+    "hysteresis_margin": 5.0,
+    "median_window": 5,
+    "persistence_streak": 3,
+    "min_rssi": null
+  },
+  "output_files": {
+    "detail_csv": "batch_output\\EST-C3-R5\\raw_with_decisions_EST-C3-R5.csv",
+    "summary_csv": "batch_output\\EST-C3-R5\\decision_summary_EST-C3-R5.csv",
+    "confusion_csv": "batch_output\\EST-C3-R5\\confusion_matrix_EST-C3-R5.csv",
+    "plots_dir": null
+  },
+  "acquisition_parameters_by_experiment": {
+    "EST-C3-R5": {
+      "experiment_id": "EST-C3-R5",
+      "created_at": "2026-08-25 10:48:49"
+    }
+  },
+  "ground_truth_summary": {
+    "c3:00:00:13:3b:b7": {
+      "events_loaded": 1,
+      "rows_with_ground_truth": 17,
+      "rows_total": 18
+    }
+  },
+  "node_time_summary": {
+    "c3:00:00:13:3b:b7": {
+      "rows_with_node_seq": 18,
+      "rows_with_node_time": 18,
+      "rows_total": 18,
+      "experiments_using_node_time": []
+    }
+  },
+  "node_seq_gap_summary": {
+    "ESP-01": [
+      {
+        "boot_id": 2239514506,
+        "num_batches_seen": 6,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 450,
+        "seq_max": 455
+      }
+    ],
+    "ESP-03": [
+      {
+        "boot_id": 1690126268,
+        "num_batches_seen": 6,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 503,
+        "seq_max": 508
+      }
+    ],
+    "ESP-02": [
+      {
+        "boot_id": 1239498715,
+        "num_batches_seen": 6,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 91,
+        "seq_max": 96
+      }
+    ]
+  },
+  "node_time_clock_warning": null,
+  "acquisition_config_divergence": {
+    "EST-C3-R5": {
+      "warnings": [],
+      "fleet": {
+        "scan_duration_sec": {
+          "homogeneous": true,
+          "effective_value": 5,
+          "registered_value": null,
+          "diverges_from_registered": false,
+          "by_esp_id": {
+            "ESP-01": 5,
+            "ESP-03": 5,
+            "ESP-02": 5
+          }
+        },
+        "upload_interval_ms": {
+          "homogeneous": true,
+          "effective_value": 10000,
+          "registered_value": null,
+          "diverges_from_registered": false,
+          "by_esp_id": {
+            "ESP-01": 10000,
+            "ESP-03": 10000,
+            "ESP-02": 10000
+          }
+        }
+      }
+    }
+  }
+}

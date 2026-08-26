@@ -1,0 +1,9 @@
+mac,method,experiment_id,transition_index,new_room,transition_time,detected,latency_sec,confirmation_time
+c3:00:00:13:3b:b7,baseline,DIN-BA-R3,0,Corredor,2026-08-25 12:52:25,False,,
+c3:00:00:13:3b:b7,baseline,DIN-BA-R3,1,Sala A,2026-08-25 12:52:32,True,8.0,2026-08-25 12:52:40
+c3:00:00:13:3b:b7,median,DIN-BA-R3,0,Corredor,2026-08-25 12:52:25,False,,
+c3:00:00:13:3b:b7,median,DIN-BA-R3,1,Sala A,2026-08-25 12:52:32,True,14.0,2026-08-25 12:52:46
+c3:00:00:13:3b:b7,median_hysteresis,DIN-BA-R3,0,Corredor,2026-08-25 12:52:25,False,,
+c3:00:00:13:3b:b7,median_hysteresis,DIN-BA-R3,1,Sala A,2026-08-25 12:52:32,False,,
+c3:00:00:13:3b:b7,median_hysteresis_persistence,DIN-BA-R3,0,Corredor,2026-08-25 12:52:25,False,,
+c3:00:00:13:3b:b7,median_hysteresis_persistence,DIN-BA-R3,1,Sala A,2026-08-25 12:52:32,False,,

@@ -1,0 +1,8 @@
+mac,method,real_room,estimated_room,count
+c3:00:00:13:3b:b7,baseline,Corredor,Corredor,5
+c3:00:00:13:3b:b7,baseline,Corredor,Sala A,5
+c3:00:00:13:3b:b7,baseline,Corredor,Sala B,5
+c3:00:00:13:3b:b7,median,Corredor,Corredor,15
+c3:00:00:13:3b:b7,median_hysteresis,Corredor,Corredor,15
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Corredor,Corredor,13
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Corredor,desconhecida,2
