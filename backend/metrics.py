@@ -54,32 +54,103 @@ def extract_true_transitions(intervals):
     return transitions
 
 
-def match_transitions_to_detections(transitions, rows):
-    """rows: chronological list of {"time", "estimated_room"} for ONE
-    (mac, experiment_id, method) - caller guarantees sorted order and that
-    all rows belong to the same experiment as `transitions`.
+def match_transitions_to_detections(transitions, rows, first_decision_index=None):
+    """rows: chronological list of {"time", "estimated_room", "changed"} for
+    ONE (mac, experiment_id, method) - caller guarantees sorted order and
+    that all rows belong to the same experiment as `transitions`. "changed"
+    must mean what decision_methods.py already means by it: "differs from
+    this method's own previous decision" - required to tell a genuine
+    reaction to the real transition apart from a room label that was
+    already sitting there from before it (see premature_before_transition
+    below - this is what a real, observed bug looked like: a method that
+    switched rooms 4s too early got credited with a perfect latency=0
+    confirmation once ground truth caught up, simply because nothing
+    "changed" at that row - see CLAUDE.md-adjacent plan notes). Only 2
+    callers exist (analyze_room_decisions.build_summary_rows via
+    compute_ground_truth_metrics, statistical_analysis.compute_per_transition_results),
+    both provide "changed" - this key is required, not optional.
 
-    For each transition, finds the first row at/after its time (and before
-    window_end, if set) whose estimated_room matches the transition's
-    new_room. Returns one dict per transition, same order:
-        {"detected": bool, "latency_sec": float|None}
-    Latency can never be negative by construction (only rows with
-    row["time"] >= transition["time"] are ever considered a match).
+    first_decision_index, when given, is this row list's OWN index (not a
+    global one) of the method's very first-ever decision - it never counts
+    as a genuine entry even if it happens to match, same "establishing the
+    first decision isn't a reaction to anything" rule num_transitions/
+    count_false_movements already apply.
+
+    For each transition, returns:
+        {"detected": bool, "latency_sec": float|None,
+         "premature_before_transition": bool, "post_transition_confirmed": bool,
+         "premature_lead_sec": float|None, "transition_status": str}
+
+    premature_before_transition: estimated_room was ALREADY new_room on the
+    last row strictly before t["time"] - exact string comparison, no
+    tolerance of any kind.
+    post_transition_confirmed: some row in [t["time"], window_end) is a
+    GENUINE entry into new_room (estimated_room==new_room AND changed==True
+    there, and not first_decision_index) - a row that only continues an
+    already-established state (changed==False) never counts on its own,
+    even though its estimated_room already matches. This is independent of
+    premature_before_transition: a method can leave the target room after
+    the real transition and genuinely re-enter it later, which must still
+    count here.
+    premature_lead_sec: only set when premature_before_transition - exact
+    backward search (no tolerance) to the nearest changed==True row that
+    started the still-ongoing streak sitting in new_room at t["time"].
+    detected == post_transition_confirmed; latency_sec is only ever
+    measured from t["time"] to a genuine entry, never from an earlier
+    premature one. transition_status is a convenience label derived from
+    the two booleans, never computed independently of them:
+        (False, True)  -> "confirmed_after_transition"
+        (False, False) -> "missed_transition"
+        (True,  True)  -> "premature_then_confirmed"
+        (True,  False) -> "premature_no_confirmation"
     """
     results = []
     for t in transitions:
-        detected = False
+        pre_transition_room = None
+        pre_transition_index = None
+        for i, row in enumerate(rows):
+            if row["time"] >= t["time"]:
+                break
+            pre_transition_room = row["estimated_room"]
+            pre_transition_index = i
+        premature_before_transition = pre_transition_room == t["new_room"]
+
+        premature_lead_sec = None
+        if premature_before_transition:
+            entry_index = pre_transition_index
+            for i in range(pre_transition_index, -1, -1):
+                if rows[i]["estimated_room"] != t["new_room"]:
+                    break
+                entry_index = i
+                if rows[i].get("changed"):
+                    break
+            premature_lead_sec = (_parse(t["time"]) - _parse(rows[entry_index]["time"])).total_seconds()
+
+        post_transition_confirmed = False
         latency = None
-        for row in rows:
+        for i, row in enumerate(rows):
             if row["time"] < t["time"]:
                 continue
             if t["window_end"] is not None and row["time"] >= t["window_end"]:
-                break  # past this transition's window - never detected
-            if row["estimated_room"] == t["new_room"]:
-                detected = True
+                break  # past this transition's window - never confirmed
+            if row["estimated_room"] == t["new_room"] and row.get("changed") and i != first_decision_index:
+                post_transition_confirmed = True
                 latency = (_parse(row["time"]) - _parse(t["time"])).total_seconds()
                 break
-        results.append({"detected": detected, "latency_sec": latency})
+
+        if premature_before_transition:
+            status = "premature_then_confirmed" if post_transition_confirmed else "premature_no_confirmation"
+        else:
+            status = "confirmed_after_transition" if post_transition_confirmed else "missed_transition"
+
+        results.append({
+            "detected": post_transition_confirmed,
+            "latency_sec": latency,
+            "premature_before_transition": premature_before_transition,
+            "post_transition_confirmed": post_transition_confirmed,
+            "premature_lead_sec": premature_lead_sec,
+            "transition_status": status,
+        })
     return results
 
 
@@ -157,9 +228,10 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
     """rows: full chronological list for ONE (mac, method), each with
     {"time", "experiment_id", "ground_truth_room", "estimated_room", "changed"}.
 
-    Returns the 12 summary columns plus "transition_details" (a list, see
-    below - callers building a decision_summary row must pop it first, it
-    isn't one of the 12 scalar columns that CSV has always had).
+    Returns the summary columns (accuracy/movements/latency/premature-
+    transition counts) plus "transition_details" (a list, see below -
+    callers building a decision_summary row must pop it first, it isn't one
+    of the scalar columns that CSV holds).
     pct_time_unknown_or_transition is always computed (it only depends on
     the method's own decided_room being None, not on ground truth). If NO
     row has ground truth coverage, every other field is None
@@ -188,6 +260,9 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
             "num_true_movements": None,
             "num_missed_movements": None,
             "missed_movement_rate": None,
+            "num_confirmed_after_transition": None,
+            "num_premature_before_transition": None,
+            "num_premature_without_confirmation": None,
             "num_false_movements": None,
             "false_movements_per_hour": None,
             "latency_median_sec": None,
@@ -202,29 +277,54 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
     accuracy = sum(1 for r in gt_rows if r["estimated_room"] == r["ground_truth_room"]) / len(gt_rows)
     num_false_movements = count_false_movements(rows, first_decision_index)
 
+    # Indexed so a GLOBAL first_decision_index can be translated into each
+    # experiment group's OWN local index below - by_experiment splits rows
+    # into per-group lists, so position i within exp_rows is generally NOT
+    # the same as position i within the full rows list (only coincides when
+    # there's a single experiment_id, the common case, but "all experiments"
+    # mode genuinely interleaves several - see this function's own docstring).
     by_experiment = {}
-    for r in rows:
-        by_experiment.setdefault(r.get("experiment_id"), []).append(r)
+    for i, r in enumerate(rows):
+        by_experiment.setdefault(r.get("experiment_id"), []).append((i, r))
 
     num_true_movements = 0
     num_missed = 0
+    num_confirmed_after_transition = 0
+    num_premature_before_transition = 0
+    num_premature_without_confirmation = 0
     all_latencies = []
     total_hours = 0.0
     transition_details = []
 
-    for experiment_id, exp_rows in by_experiment.items():
+    for experiment_id, indexed_exp_rows in by_experiment.items():
+        exp_rows = [r for _, r in indexed_exp_rows]
+        local_first_decision_index = None
+        if first_decision_index is not None:
+            for local_i, (global_i, _) in enumerate(indexed_exp_rows):
+                if global_i == first_decision_index:
+                    local_first_decision_index = local_i
+                    break
         intervals = gt_intervals_by_experiment.get(experiment_id, [])
         if len(intervals) >= 2:
             transitions = extract_true_transitions(intervals)
-            detections = match_transitions_to_detections(transitions, exp_rows)
+            detections = match_transitions_to_detections(transitions, exp_rows, first_decision_index=local_first_decision_index)
             num_true_movements += len(transitions)
             for transition_index, (t, d) in enumerate(zip(transitions, detections)):
-                if d["detected"]:
+                # Branch explicitly on the two dimensions, never on "detected"
+                # alone - premature_no_confirmation also has detected=False
+                # now, and must never be folded into num_missed by accident.
+                if d["post_transition_confirmed"]:
+                    num_confirmed_after_transition += 1
                     all_latencies.append(d["latency_sec"])
                     confirmation_time = (_parse(t["time"]) + timedelta(seconds=d["latency_sec"])).strftime(TIME_FORMAT)
+                elif d["premature_before_transition"]:
+                    num_premature_without_confirmation += 1
+                    confirmation_time = None
                 else:
                     num_missed += 1
                     confirmation_time = None
+                if d["premature_before_transition"]:
+                    num_premature_before_transition += 1
                 transition_details.append({
                     "experiment_id": experiment_id,
                     "transition_index": transition_index,
@@ -233,6 +333,10 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
                     "detected": d["detected"],
                     "latency_sec": d["latency_sec"],
                     "confirmation_time": confirmation_time,
+                    "premature_before_transition": d["premature_before_transition"],
+                    "post_transition_confirmed": d["post_transition_confirmed"],
+                    "premature_lead_sec": d["premature_lead_sec"],
+                    "transition_status": d["transition_status"],
                 })
         if exp_rows:
             elapsed_hours = (_parse(exp_rows[-1]["time"]) - _parse(exp_rows[0]["time"])).total_seconds() / 3600.0
@@ -247,6 +351,9 @@ def compute_ground_truth_metrics(rows, gt_intervals_by_experiment, first_decisio
         "num_true_movements": num_true_movements,
         "num_missed_movements": num_missed,
         "missed_movement_rate": missed_movement_rate,
+        "num_confirmed_after_transition": num_confirmed_after_transition,
+        "num_premature_before_transition": num_premature_before_transition,
+        "num_premature_without_confirmation": num_premature_without_confirmation,
         "num_false_movements": num_false_movements,
         "false_movements_per_hour": false_movements_per_hour,
         "latency_median_sec": latency_summary["median"],

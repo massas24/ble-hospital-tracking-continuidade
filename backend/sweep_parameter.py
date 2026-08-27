@@ -1,5 +1,5 @@
 """
-Varredura de um parâmetro de decisão (--median-window, --hysteresis-margin
+Varredura de um parâmetro de decisão (--median-window-sec, --hysteresis-margin
 ou --persistence-streak) através de várias repetições, para a figura 8 do
 guião (secção "5.6 Influência dos parâmetros" - janela temporal, histerese
 E persistência, não só a janela).
@@ -14,7 +14,7 @@ em cada ponto da varredura).
 
 Uso:
   python sweep_parameter.py --experiment-id ensaio3 ensaio4 ensaio5 \\
-      --parameter median-window --values 1 3 5 8 10 \\
+      --parameter median-window-sec --values 5 8 10 \\
       --mac aa:bb:cc:dd:ee:01
 """
 import argparse
@@ -29,24 +29,24 @@ from statistical_analysis import (
 )
 
 PARAMETER_FLAGS = {
-    "median-window": "--median-window",
+    "median-window-sec": "--median-window-sec",
     "hysteresis-margin": "--hysteresis-margin",
     "persistence-streak": "--persistence-streak",
 }
-# analyze_room_decisions.py declares --median-window/--persistence-streak as
-# int and --hysteresis-margin as float - --values is always parsed as float
-# here (so e.g. "5" and "5.5" can both be typed), so the swept value must be
-# cast to the RIGHT type before being formatted into the subprocess command,
-# or int-typed flags reject "5.0" outright.
+# analyze_room_decisions.py declares --persistence-streak como int e
+# --median-window-sec/--hysteresis-margin como float - --values é sempre
+# lido como float aqui (para "5" e "5.5" poderem ambos ser digitados), por
+# isso o valor varrido tem de ser convertido para o tipo CERTO antes de ser
+# formatado no comando do subprocesso, ou uma flag int rejeita "5.0" à letra.
 PARAMETER_TYPES = {
-    "median-window": int,
+    "median-window-sec": float,
     "hysteresis-margin": float,
     "persistence-streak": int,
 }
 # Nomes dos argumentos fixos correspondentes, para reencaminhar os OUTROS
 # 2 parâmetros de decisão inalterados em cada chamada.
 PARAMETER_ARG_NAMES = {
-    "median-window": "median_window",
+    "median-window-sec": "median_window_sec",
     "hysteresis-margin": "hysteresis_margin",
     "persistence-streak": "persistence_streak",
 }
@@ -85,7 +85,7 @@ def main():
     parser.add_argument("--parameter", required=True, choices=sorted(PARAMETER_FLAGS.keys()))
     parser.add_argument("--values", nargs="+", required=True, type=float)
     parser.add_argument("--mac", nargs="+", default=None)
-    parser.add_argument("--median-window", type=int, default=5, help="fixo, exceto se --parameter for este")
+    parser.add_argument("--median-window-sec", type=float, default=8.0, help="fixo, exceto se --parameter for este")
     parser.add_argument("--hysteresis-margin", type=float, default=5, help="fixo, exceto se --parameter for este")
     parser.add_argument("--persistence-streak", type=int, default=3, help="fixo, exceto se --parameter for este")
     parser.add_argument("--min-rssi", type=float, default=None)

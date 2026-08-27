@@ -104,6 +104,8 @@ FRIEDMAN_COLUMNS = [
 TRANSITION_DETAIL_COLUMNS = [
     "mac", "experiment_id", "transition_index", "new_room", "method",
     "detected", "latency_sec", "latency_is_anchor_artifact",
+    "premature_before_transition", "post_transition_confirmed",
+    "premature_lead_sec", "transition_status",
 ]
 DETECTION_RATE_COLUMNS = ["mac", "experiment_id", "method", "n_transitions", "n_detected", "detection_rate"]
 TRANSITION_WILCOXON_COLUMNS = [
@@ -655,7 +657,10 @@ def compute_per_transition_results(records, macs=None):
             continue
         transitions = metrics.extract_true_transitions(intervals)
         for method in METHODS:
-            method_rows = [{"time": r["time"], "estimated_room": r.get(f"{method}_room")} for r in rows]
+            method_rows = [
+                {"time": r["time"], "estimated_room": r.get(f"{method}_room"), "changed": r.get(f"{method}_changed")}
+                for r in rows
+            ]
             matches = metrics.match_transitions_to_detections(transitions, method_rows)
             for idx, (transition, match) in enumerate(zip(transitions, matches)):
                 results.append({
@@ -663,6 +668,10 @@ def compute_per_transition_results(records, macs=None):
                     "transition_index": idx, "new_room": transition["new_room"],
                     "method": method, "detected": match["detected"], "latency_sec": match["latency_sec"],
                     "latency_is_anchor_artifact": method == "baseline",
+                    "premature_before_transition": match["premature_before_transition"],
+                    "post_transition_confirmed": match["post_transition_confirmed"],
+                    "premature_lead_sec": match["premature_lead_sec"],
+                    "transition_status": match["transition_status"],
                 })
     return results
 

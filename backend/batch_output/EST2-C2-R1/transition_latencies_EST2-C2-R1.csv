@@ -1,0 +1,1 @@
+mac,method,experiment_id,transition_index,new_room,transition_time,detected,latency_sec,confirmation_time,premature_before_transition,post_transition_confirmed,premature_lead_sec,transition_status

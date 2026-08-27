@@ -1,0 +1,28 @@
+mac,method,real_room,estimated_room,count
+c3:00:00:13:3b:b7,baseline,Corredor,Corredor,1
+c3:00:00:13:3b:b7,baseline,Corredor,Sala A,1
+c3:00:00:13:3b:b7,baseline,Corredor,Sala B,1
+c3:00:00:13:3b:b7,baseline,Sala A,Corredor,3
+c3:00:00:13:3b:b7,baseline,Sala A,Sala A,3
+c3:00:00:13:3b:b7,baseline,Sala A,Sala B,3
+c3:00:00:13:3b:b7,baseline,Sala B,Corredor,3
+c3:00:00:13:3b:b7,baseline,Sala B,Sala A,3
+c3:00:00:13:3b:b7,baseline,Sala B,Sala B,3
+c3:00:00:13:3b:b7,median,Corredor,Corredor,1
+c3:00:00:13:3b:b7,median,Corredor,Sala A,2
+c3:00:00:13:3b:b7,median,Sala A,Corredor,1
+c3:00:00:13:3b:b7,median,Sala A,Sala A,6
+c3:00:00:13:3b:b7,median,Sala A,Sala B,2
+c3:00:00:13:3b:b7,median,Sala B,Sala A,1
+c3:00:00:13:3b:b7,median,Sala B,Sala B,8
+c3:00:00:13:3b:b7,median_hysteresis,Corredor,Corredor,1
+c3:00:00:13:3b:b7,median_hysteresis,Corredor,Sala A,2
+c3:00:00:13:3b:b7,median_hysteresis,Sala A,Corredor,1
+c3:00:00:13:3b:b7,median_hysteresis,Sala A,Sala A,6
+c3:00:00:13:3b:b7,median_hysteresis,Sala A,Sala B,2
+c3:00:00:13:3b:b7,median_hysteresis,Sala B,Sala A,1
+c3:00:00:13:3b:b7,median_hysteresis,Sala B,Sala B,8
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Corredor,desconhecida,3
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Sala A,desconhecida,9
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Sala B,Sala A,3
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Sala B,Sala B,6

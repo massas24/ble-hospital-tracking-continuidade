@@ -1,0 +1,108 @@
+{
+  "run_timestamp": "2026-08-26 15:15:58",
+  "experiment_id_filter": "DIN2–BA-R4",
+  "mac_filter": [
+    "c3:00:00:13:3b:b7"
+  ],
+  "resolved_macs": [
+    "c3:00:00:13:3b:b7"
+  ],
+  "analysis_parameters": {
+    "hysteresis_margin": 5.0,
+    "median_window_sec": 8.0,
+    "persistence_streak": 3,
+    "min_rssi": null
+  },
+  "output_files": {
+    "detail_csv": "validation_corredor_sweep/window_8\\raw_with_decisions_DIN2–BA-R4.csv",
+    "summary_csv": "validation_corredor_sweep/window_8\\decision_summary_DIN2–BA-R4.csv",
+    "confusion_csv": "validation_corredor_sweep/window_8\\confusion_matrix_DIN2–BA-R4.csv",
+    "plots_dir": null
+  },
+  "acquisition_parameters_by_experiment": {
+    "DIN2–BA-R4": {
+      "experiment_id": "DIN2–BA-R4",
+      "created_at": "2026-08-26 14:43:09"
+    }
+  },
+  "ground_truth_summary": {
+    "c3:00:00:13:3b:b7": {
+      "events_loaded": 3,
+      "rows_with_ground_truth": 18,
+      "rows_total": 18
+    }
+  },
+  "node_time_summary": {
+    "c3:00:00:13:3b:b7": {
+      "rows_with_node_seq": 18,
+      "rows_with_node_time": 18,
+      "rows_total": 18,
+      "experiments_using_node_time": []
+    }
+  },
+  "node_seq_gap_summary": {
+    "ESP-03": [
+      {
+        "boot_id": 1366431522,
+        "num_batches_seen": 6,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 2924,
+        "seq_max": 2929
+      }
+    ],
+    "ESP-01": [
+      {
+        "boot_id": 2605610151,
+        "num_batches_seen": 6,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 2911,
+        "seq_max": 2916
+      }
+    ],
+    "ESP-02": [
+      {
+        "boot_id": 4156849429,
+        "num_batches_seen": 6,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 72,
+        "seq_max": 77
+      }
+    ]
+  },
+  "node_time_clock_warning": null,
+  "acquisition_config_divergence": {
+    "DIN2–BA-R4": {
+      "warnings": [],
+      "fleet": {
+        "scan_duration_sec": {
+          "homogeneous": true,
+          "effective_value": 5,
+          "registered_value": null,
+          "diverges_from_registered": false,
+          "by_esp_id": {
+            "ESP-03": 5,
+            "ESP-01": 5,
+            "ESP-02": 5
+          }
+        },
+        "upload_interval_ms": {
+          "homogeneous": true,
+          "effective_value": 2000,
+          "registered_value": null,
+          "diverges_from_registered": false,
+          "by_esp_id": {
+            "ESP-03": 2000,
+            "ESP-01": 2000,
+            "ESP-02": 2000
+          }
+        }
+      }
+    }
+  }
+}

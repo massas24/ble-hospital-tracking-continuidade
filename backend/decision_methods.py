@@ -32,9 +32,20 @@ devem excluir o primeiro True (consulte analyze_room_decisions.py).
 """
 
 import statistics
+from datetime import datetime, timedelta
 
 # Kept in sync with backend/app.py's HYSTERESIS_MARGIN constant
 HYSTERESIS_MARGIN = 5
+
+# Duplicado (não importado) de metrics.TIME_FORMAT/_parse: decision_methods.py
+# é importado por app.py, e metrics.py é deliberadamente nunca importado por
+# app.py (ver CLAUDE.md) - importar aqui furaria essa fronteira só para
+# poupar 2 linhas.
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _parse_time(time_str):
+    return datetime.strptime(time_str, TIME_FORMAT)
 
 
 def _is_numeric(value):
@@ -278,16 +289,173 @@ def decide_median_hysteresis(detections, window=5, margin=HYSTERESIS_MARGIN):
     return decide_hysteresis(candidates, margin=margin)
 
 
-def decide_median_hysteresis_persistence(detections, window=5, margin=HYSTERESIS_MARGIN, streak=3):
-    """Filtragem mediana + histerese + persistência: executa
-    decide_median_hysteresis() primeiro e depois alimenta a sua sequência de salas em
+def decide_median_hysteresis_persistence(detections, window_sec=8.0, margin=HYSTERESIS_MARGIN, streak=3):
+    """Filtragem mediana (janela temporal) + histerese corrigida + persistência: executa
+    decide_median_hysteresis_windowed() primeiro e depois alimenta a sua sequência de salas em
     decide_persistence() (que analisa sempre apenas "room", nunca "rssi").
+    Só usada offline - decide_persistence() em si fica intocado.
 
     Retorna um dicionário por deteção de entrada (mesmo formato que decide_persistence()):
 
     {"decided_room": str|None, "changed": bool}
 
     """
-    mh_results = decide_median_hysteresis(detections, window=window, margin=margin)
+    mh_results = decide_median_hysteresis_windowed(detections, window_sec=window_sec, margin=margin)
     candidates = [{"room": r["decided_room"]} for r in mh_results]
     return decide_persistence(candidates, streak=streak)
+
+
+def decide_median_windowed(detections, window_sec=8.0):
+    """Como decide_median(), mas com janela TEMPORAL real em vez de contagem
+    fixa de deteções: no ponto i, considera todas as deteções j<=i cujo
+    "time" caia em [time[i] - window_sec, time[i]]. Só usada offline -
+    decide_median() em si fica intocado (usado ao vivo por app.py através de
+    decide_median_hysteresis()).
+
+    Cada deteção de entrada precisa agora também da chave "time" (string
+    TIME_FORMAT). O parsing é feito uma única vez à entrada, não repetido
+    por janela.
+
+    Mesmo desempate de decide_median() (sala anterior, depois mais amostras,
+    depois leitura mais recente, depois ordem alfabética).
+
+    Retorna um dicionário por deteção de entrada:
+    {"decided_room": str|None, "decided_median_rssi": float|None,
+    "changed": bool, "num_valid_in_window": int, "medians_by_room": dict}
+    "medians_by_room" é o dict COMPLETO de medianas por sala nesta janela
+    (não só a da sala vencedora) - necessário para decide_median_hysteresis_windowed()
+    comparar contra a sala atualmente confirmada, não só a candidata.
+    """
+    results = []
+    previous_room = None
+    previous_rssi = None
+
+    times = [_parse_time(d["time"]) for d in detections]
+
+    left = 0
+    for i in range(len(detections)):
+        while times[i] - times[left] > timedelta(seconds=window_sec):
+            left += 1
+        window_slice = detections[left: i + 1]
+
+        by_room = {}
+        for pos, d in enumerate(window_slice):
+            rssi = d.get("rssi")
+            if not _is_numeric(rssi):
+                continue
+            by_room.setdefault(d.get("room"), []).append((pos, rssi))
+
+        num_valid = sum(len(v) for v in by_room.values())
+
+        if not by_room:
+            decided_room = previous_room
+            decided_median_rssi = previous_rssi
+            medians_by_room = {}
+        else:
+            medians_by_room = {
+                room: statistics.median(rssi for _, rssi in vals)
+                for room, vals in by_room.items()
+            }
+            best = max(medians_by_room.values())
+            tied = [room for room, m in medians_by_room.items() if m == best]
+
+            if len(tied) > 1 and previous_room in tied:
+                decided_room = previous_room
+            elif len(tied) == 1:
+                decided_room = tied[0]
+            else:
+                counts = {room: len(by_room[room]) for room in tied}
+                max_count = max(counts.values())
+                tied = [room for room in tied if counts[room] == max_count]
+                if len(tied) == 1:
+                    decided_room = tied[0]
+                else:
+                    last_pos = {room: max(pos for pos, _ in by_room[room]) for room in tied}
+                    max_last = max(last_pos.values())
+                    tied = [room for room in tied if last_pos[room] == max_last]
+                    decided_room = sorted(tied)[0]
+
+            decided_median_rssi = medians_by_room[decided_room]
+
+        results.append({
+            "decided_room": decided_room,
+            "decided_median_rssi": decided_median_rssi,
+            "changed": decided_room != previous_room,
+            "num_valid_in_window": num_valid,
+            "medians_by_room": medians_by_room,
+        })
+        previous_room = decided_room
+        previous_rssi = decided_median_rssi
+
+    return results
+
+
+def decide_median_hysteresis_windowed(detections, window_sec=8.0, margin=HYSTERESIS_MARGIN):
+    """Histerese corrigida: compara o candidato (sala vencedora da mediana
+    neste ponto) contra a mediana da sala ATUALMENTE CONFIRMADA na MESMA
+    janela corrente - não contra um RSSI histórico congelado de quando essa
+    sala foi confirmada pela última vez (ao contrário de decide_hysteresis(),
+    que fica intocado para uso ao vivo/compatibilidade). Só usada offline.
+
+    Se a sala atualmente confirmada não tiver nenhuma observação válida na
+    janela corrente, o candidato é aceite sem comparação - MAS só se o
+    próprio candidato tiver uma mediana válida (janela totalmente vazia de
+    RSSI numérico não deve mudar o estado às cegas).
+
+    Retorna um dicionário por deteção de entrada:
+    {"decided_room": str|None, "decided_rssi": value|None, "changed": bool,
+    "rejected": bool, "candidate_room": str|None, "candidate_rssi": value|None,
+    "current_room_rssi": value|None, "difference_db": float|None}
+    """
+    median_results = decide_median_windowed(detections, window_sec=window_sec)
+
+    results = []
+    current_room = None
+    current_rssi = None
+    previous_room = None
+
+    for m in median_results:
+        candidate_room = m["decided_room"]
+        medians_by_room = m["medians_by_room"]
+        candidate_rssi = medians_by_room.get(candidate_room)
+        rejected = False
+        difference_db = None
+        # RSSI da sala confirmada ANTES desta deteção, na janela ATUAL - a
+        # base de comparação usada por esta decisão (None quando não há
+        # comparação: primeira deteção, ou sala atual sem dados agora).
+        current_room_rssi = medians_by_room.get(current_room) if current_room is not None else None
+
+        if current_room is None or candidate_room == current_room:
+            current_room = candidate_room
+            current_rssi = candidate_rssi
+        elif current_room_rssi is None:
+            # Sala atual sem qualquer observação válida na janela: só aceita
+            # o candidato se ELE tiver suporte - janela vazia de RSSI não
+            # deve mudar o estado às cegas.
+            if candidate_rssi is not None:
+                current_room = candidate_room
+                current_rssi = candidate_rssi
+            else:
+                rejected = True
+        else:
+            difference_db = candidate_rssi - current_room_rssi if candidate_rssi is not None else None
+            strong_enough = candidate_rssi is not None and candidate_rssi >= current_room_rssi + margin
+            if strong_enough:
+                current_room = candidate_room
+                current_rssi = candidate_rssi
+            else:
+                rejected = True
+
+        results.append({
+            "decided_room": current_room,
+            "decided_rssi": current_rssi,
+            "changed": current_room != previous_room,
+            "rejected": rejected,
+            "candidate_room": candidate_room,
+            "candidate_rssi": candidate_rssi,
+            "current_room_rssi": current_room_rssi,
+            "difference_db": difference_db,
+        })
+        previous_room = current_room
+
+    return results

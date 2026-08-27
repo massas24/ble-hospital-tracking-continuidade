@@ -1,0 +1,13 @@
+mac,method,real_room,estimated_room,count
+c3:00:00:13:3b:b7,baseline,Sala A,Corredor,18
+c3:00:00:13:3b:b7,baseline,Sala A,Sala A,18
+c3:00:00:13:3b:b7,baseline,Sala A,Sala B,17
+c3:00:00:13:3b:b7,median,Sala A,Corredor,7
+c3:00:00:13:3b:b7,median,Sala A,Sala A,44
+c3:00:00:13:3b:b7,median,Sala A,Sala B,2
+c3:00:00:13:3b:b7,median_hysteresis,Sala A,Corredor,7
+c3:00:00:13:3b:b7,median_hysteresis,Sala A,Sala A,44
+c3:00:00:13:3b:b7,median_hysteresis,Sala A,Sala B,2
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Sala A,Corredor,4
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Sala A,Sala A,47
+c3:00:00:13:3b:b7,median_hysteresis_persistence,Sala A,desconhecida,2

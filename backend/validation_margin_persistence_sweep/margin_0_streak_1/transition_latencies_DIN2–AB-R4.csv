@@ -1,0 +1,9 @@
+mac,method,experiment_id,transition_index,new_room,transition_time,detected,latency_sec,confirmation_time,premature_before_transition,post_transition_confirmed,premature_lead_sec,transition_status
+c3:00:00:13:3b:b7,baseline,DIN2–AB-R4,0,Corredor,2026-08-26 14:42:36,True,4.0,2026-08-26 14:42:40,True,True,3.0,premature_then_confirmed
+c3:00:00:13:3b:b7,baseline,DIN2–AB-R4,1,Sala B,2026-08-26 14:42:43,True,1.0,2026-08-26 14:42:44,False,True,,confirmed_after_transition
+c3:00:00:13:3b:b7,median,DIN2–AB-R4,0,Corredor,2026-08-26 14:42:36,False,,,False,False,,missed_transition
+c3:00:00:13:3b:b7,median,DIN2–AB-R4,1,Sala B,2026-08-26 14:42:43,True,1.0,2026-08-26 14:42:44,False,True,,confirmed_after_transition
+c3:00:00:13:3b:b7,median_hysteresis,DIN2–AB-R4,0,Corredor,2026-08-26 14:42:36,False,,,False,False,,missed_transition
+c3:00:00:13:3b:b7,median_hysteresis,DIN2–AB-R4,1,Sala B,2026-08-26 14:42:43,True,1.0,2026-08-26 14:42:44,False,True,,confirmed_after_transition
+c3:00:00:13:3b:b7,median_hysteresis_persistence,DIN2–AB-R4,0,Corredor,2026-08-26 14:42:36,False,,,False,False,,missed_transition
+c3:00:00:13:3b:b7,median_hysteresis_persistence,DIN2–AB-R4,1,Sala B,2026-08-26 14:42:43,True,1.0,2026-08-26 14:42:44,False,True,,confirmed_after_transition

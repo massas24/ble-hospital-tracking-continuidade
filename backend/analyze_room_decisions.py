@@ -222,25 +222,39 @@ def _group_uses_node_time(docs):
     return len({d.get("esp_id") for d in docs}) == 1
 
 
-def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persistence_streak, gt_intervals_by_experiment):
-    baseline = dm.decide_baseline(docs)
-    median = dm.decide_median(docs, window=median_window)
-    med_hyst = dm.decide_median_hysteresis(docs, window=median_window, margin=hysteresis_margin)
-    med_hyst_pers = dm.decide_median_hysteresis_persistence(
-        docs, window=median_window, margin=hysteresis_margin, streak=persistence_streak
-    )
-
-    def agree(a, b):
-        return a is not None and b is not None and a == b
-
-    # Escolha do relógio por CONJUNTO (mac, experiment_id), pré-calculada
-    # antes do ciclo principal - ver _group_uses_node_time.
+def build_detail_dataframe(mac, docs, hysteresis_margin, median_window_sec, persistence_streak, gt_intervals_by_experiment):
+    # Escolha do relógio por CONJUNTO (mac, experiment_id), calculada ANTES
+    # das funções de decisão (não depois, como antes desta correção) - agora
+    # precisamos de "effective_time" já disponível para alimentar a janela
+    # temporal de decide_median_windowed(). Ver _group_uses_node_time.
     docs_by_experiment = {}
     for doc in docs:
         docs_by_experiment.setdefault(doc.get("experiment_id"), []).append(doc)
     uses_node_time_by_experiment = {
         exp_id: _group_uses_node_time(exp_docs) for exp_id, exp_docs in docs_by_experiment.items()
     }
+    effective_times = [
+        doc.get("node_time") if uses_node_time_by_experiment.get(doc.get("experiment_id"), False) else doc.get("time")
+        for doc in docs
+    ]
+
+    baseline = dm.decide_baseline(docs)
+    # Lista derivada minima {"room","rssi","time"} para as funções offline
+    # com janela temporal - não muta docs (que mantém o seu próprio "time" de
+    # receção, usado mais abaixo na própria linha de saída).
+    windowed_input = [
+        {"room": doc.get("room"), "rssi": doc.get("rssi"), "time": t}
+        for doc, t in zip(docs, effective_times)
+    ]
+    median = dm.decide_median_windowed(windowed_input, window_sec=median_window_sec)
+    med_hyst = dm.decide_median_hysteresis_windowed(windowed_input, window_sec=median_window_sec, margin=hysteresis_margin)
+    med_hyst_pers = dm.decide_median_hysteresis_persistence(
+        windowed_input, window_sec=median_window_sec, margin=hysteresis_margin, streak=persistence_streak
+    )
+
+    def agree(a, b):
+        return a is not None and b is not None and a == b
+
     # Idem para trial_type/trial_position (protocolo de 75 ensaios) -
     # derivado uma vez por experiment_id, não por linha.
     trial_labels_by_experiment = {
@@ -248,13 +262,12 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persiste
     }
 
     rows = []
-    for doc, b, m, mh, mhp in zip(docs, baseline, median, med_hyst, med_hyst_pers):
+    for doc, effective_time, b, m, mh, mhp in zip(docs, effective_times, baseline, median, med_hyst, med_hyst_pers):
         b_room, m_room, mh_room, mhp_room = (
             b["decided_room"], m["decided_room"], mh["decided_room"], mhp["decided_room"],
         )
         experiment_id = doc.get("experiment_id")
         uses_node_time = uses_node_time_by_experiment.get(experiment_id, False)
-        effective_time = doc.get("node_time") if uses_node_time else doc.get("time")
         # Looked up per-row using THIS row's own experiment_id, not the CLI
         # filter - in "all experiments" mode a single mac's docs can span
         # more than one trial.
@@ -287,6 +300,10 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window, persiste
             "median_hysteresis_room": mh_room,
             "median_hysteresis_changed": mh["changed"],
             "median_hysteresis_rejected": mh["rejected"],
+            "median_hysteresis_candidate_room": mh["candidate_room"],
+            "median_hysteresis_candidate_rssi": mh["candidate_rssi"],
+            "median_hysteresis_current_room_rssi": mh["current_room_rssi"],
+            "median_hysteresis_difference_db": mh["difference_db"],
             "median_hysteresis_persistence_room": mhp_room,
             "median_hysteresis_persistence_changed": mhp["changed"],
             "baseline_agrees_with_final": agree(b_room, mhp_room),
@@ -609,7 +626,8 @@ def main():
     parser.add_argument("--experiment-id", default=None, help="Filtrar por experiment_id (default: todos)")
     parser.add_argument("--mac", nargs="+", default=None, help="Um ou mais MACs (default: todos os presentes nos dados)")
     parser.add_argument("--hysteresis-margin", type=float, default=dm.HYSTERESIS_MARGIN)
-    parser.add_argument("--median-window", type=int, default=5)
+    parser.add_argument("--median-window-sec", type=float, default=8.0,
+                         help="Janela temporal em segundos usada no cálculo da mediana RSSI")
     parser.add_argument("--persistence-streak", type=int, default=3)
     parser.add_argument("--min-rssi", type=float, default=None,
                          help="Ignora leituras com RSSI abaixo deste limiar (default: sem filtro)")
@@ -634,6 +652,8 @@ def main():
     raw_detections = db["raw_detections"]
     ground_truth = db["ground_truth"]
     experiments = db["experiments"]
+
+    
 
     print(f"A carregar raw_detections (experiment_id={args.experiment_id!r}, mac={macs})...")
     data_by_mac = load_detections_by_mac(raw_detections, args.experiment_id, macs)
@@ -669,7 +689,7 @@ def main():
         gt_intervals_by_experiment = build_ground_truth_intervals(gt_events)
 
         detail_df = build_detail_dataframe(
-            mac, docs, args.hysteresis_margin, args.median_window, args.persistence_streak,
+            mac, docs, args.hysteresis_margin, args.median_window_sec, args.persistence_streak,
             gt_intervals_by_experiment,
         )
         all_detail_frames.append(detail_df)
@@ -725,7 +745,9 @@ def main():
     pd.DataFrame(
         all_transition_latency_rows,
         columns=["mac", "method", "experiment_id", "transition_index", "new_room",
-                 "transition_time", "detected", "latency_sec", "confirmation_time"],
+                 "transition_time", "detected", "latency_sec", "confirmation_time",
+                 "premature_before_transition", "post_transition_confirmed",
+                 "premature_lead_sec", "transition_status"],
     ).to_csv(transition_latencies_csv, index=False)
 
     # Acquisition parameters (scan duration/interval, firmware RSSI cutoff)
@@ -770,7 +792,7 @@ def main():
         "resolved_macs": sorted(data_by_mac.keys()),
         "analysis_parameters": {
             "hysteresis_margin": args.hysteresis_margin,
-            "median_window": args.median_window,
+            "median_window_sec": args.median_window_sec,
             "persistence_streak": args.persistence_streak,
             "min_rssi": args.min_rssi,
         },

@@ -43,7 +43,7 @@ def run_one(experiment_id, args, output_dir):
     cmd = [
         sys.executable, "analyze_room_decisions.py",
         "--experiment-id", experiment_id,
-        "--median-window", str(args.median_window),
+        "--median-window-sec", str(args.median_window_sec),
         "--hysteresis-margin", str(args.hysteresis_margin),
         "--persistence-streak", str(args.persistence_streak),
         "--no-plots",
@@ -67,7 +67,7 @@ def main():
                          help="descobre experiment_id em raw_detections cujo nome comece por qualquer um destes "
                               "prefixos (ex: EST- DIN-), além dos indicados em --experiment-ids")
     parser.add_argument("--mac", nargs="+", default=None)
-    parser.add_argument("--median-window", type=int, default=5)
+    parser.add_argument("--median-window-sec", type=float, default=8.0)
     parser.add_argument("--hysteresis-margin", type=float, default=5)
     parser.add_argument("--persistence-streak", type=int, default=3)
     parser.add_argument("--min-rssi", type=float, default=None)

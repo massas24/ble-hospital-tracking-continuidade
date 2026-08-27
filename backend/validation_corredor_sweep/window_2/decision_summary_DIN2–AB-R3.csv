@@ -1,0 +1,5 @@
+mac,method,num_detections,num_decided,num_transitions,first_decision_index,agree_rate_vs_final,accuracy,num_true_movements,num_missed_movements,missed_movement_rate,num_confirmed_after_transition,num_premature_before_transition,num_premature_without_confirmation,num_false_movements,false_movements_per_hour,latency_median_sec,latency_p95_sec,latency_iqr_sec,latency_min_sec,latency_max_sec,pct_time_unknown_or_transition
+c3:00:00:13:3b:b7,baseline,21,21,20,0.0,,0.3333333333333333,2,0,0.0,2,1,0,14,1172.093023255814,2.0,2.9,1.0,1.0,3.0,0.0
+c3:00:00:13:3b:b7,median,21,21,14,0.0,,0.38095238095238093,2,1,0.5,1,1,0,10,837.2093023255813,10.0,10.0,0.0,10.0,10.0,0.0
+c3:00:00:13:3b:b7,median_hysteresis,21,21,14,0.0,,0.38095238095238093,2,1,0.5,1,1,0,10,837.2093023255813,10.0,10.0,0.0,10.0,10.0,0.0
+c3:00:00:13:3b:b7,median_hysteresis_persistence,21,0,0,,,0.0,2,2,1.0,0,0,0,0,0.0,,,,,,100.0
