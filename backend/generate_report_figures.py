@@ -51,10 +51,10 @@ METHOD_COLORS = {
     "median_hysteresis_persistence": "#1baf7a",
 }
 METHOD_LABELS_PT = {
-    "baseline": "Maior RSSI\ninstantâneo",
-    "median": "Mediana\ndo RSSI",
-    "median_hysteresis": "Mediana +\nhisterese",
-    "median_hysteresis_persistence": "Método\ncombinado",
+    "baseline": "Baseline",
+    "median": "Mediana",
+    "median_hysteresis": "Mediana +\nHisterese",
+    "median_hysteresis_persistence": "Mediana + Histerese\n+ Persistência",
 }
 UNKNOWN_ROOM_LABEL = "desconhecida"
 # Deliberadamente diferente de UNKNOWN_ROOM_LABEL: "desconhecida" já

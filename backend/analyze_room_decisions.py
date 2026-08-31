@@ -86,7 +86,14 @@ def normalize_mac(mac):
 # para estáticos, DIN-<rota>-R<n> para dinâmicos (ex. "EST-A1-R3"). Maiúsculas
 # estritas - um erro de maiúsculas deve ficar sinalizado como aviso (ver
 # batch_analyze_experiments.py), não "corrigido" em silêncio.
-TRIAL_LABEL_PATTERN = re.compile(r"^(EST|DIN)-([A-Z0-9]+)-R(\d+)$")
+# \d* depois de EST/DIN aceita variantes de campanha como EST2-/DIN2- (nova
+# aquisição), sem exigir uma lista fechada de sufixos - qualquer geração
+# futura (EST3, DIN4, ...) já fica reconhecida sem voltar a mexer aqui.
+# [-–] aceita tanto hífen normal como travessão (U+2013) como separador -
+# encontrado repetidamente em campanhas reais (autocorreção do teclado do
+# telemóvel ao registar o experiment_id), nunca um erro de dados em si, só
+# um caractere diferente do esperado.
+TRIAL_LABEL_PATTERN = re.compile(r"^(EST|DIN)\d*[-–]([A-Z0-9]+)[-–]R(\d+)$")
 
 
 def parse_trial_label(experiment_id):
