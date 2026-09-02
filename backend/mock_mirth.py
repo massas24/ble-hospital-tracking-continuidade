@@ -37,7 +37,6 @@ class MockMirthHandler(BaseHTTPRequestHandler):
         self.wfile.write(response)
 
     def log_message(self, format, *args):
-        # Silence the default per-request access log line; we print our own.
         pass
 
 

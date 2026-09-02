@@ -24,7 +24,7 @@ import time
 
 import requests
 
-HYSTERESIS_MARGIN = 5  # Must match backend/app.py's HYSTERESIS_MARGIN
+HYSTERESIS_MARGIN = 5 
 
 MAC = "aa:bb:cc:dd:ee:01"
 ROOM_A = "Quarto-101"

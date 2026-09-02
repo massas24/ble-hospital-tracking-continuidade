@@ -1,34 +1,14 @@
 """
-Comparação offline de quatro configurações de decisão de ambiente progressivamente mais rigorosas
-reproduzidas sobre as deteções BLE em bruto já armazenadas por backend/app.py na
-coleção raw_detections do MongoDB:
+Análise offline de quatro métodos de decisão de ambiente sobre deteções BLE
+armazenadas em raw_detections:
 
-1. linha de base - a leitura mais recente ganha, sem filtragem
-2. mediana - RSSI mediano numa janela deslizante
-3. histerese mediana - + margem necessária para mudar de ambiente
-4. persistência de histerese mediana - + N leituras consecutivas para confirmar
+1. Baseline
+2. Mediana
+3. Mediana + Histerese
+4. Mediana + Histerese + Persistência
 
-Cada uma é uma versão progressivamente mais rigorosa da anterior (ver
-decision_methods.py), e não uma alternativa independente - portanto, em vez de uma
-matriz de concordância de todos os pares, cada estágio é comparado com o estágio final
-(mais filtrado) através de agree_rate_vs_final.
-
-Nenhum valor de referência é aqui utilizado - isto compara as quatro configurações
-entre si (taxa de concordância, número de transições), e não com um
-ambiente conhecido e correto. Esta comparação pode ser adicionada posteriormente, após a definição do valor de referência. verdade
-Os dados existem.
-
-Requer pandas e matplotlib para além dos requisitos básicos do backend:
-
-pip instalar -r requisitos.txt -r requisitos-análise.txt
-
-Uso:
-
-python analyze_room_decisions.py --mac aa:bb:cc:dd:ee:01 --experiment-id test1
-
-python analyze_room_decisions.py # todas as experiências, todos os macs
-
-python analyze_room_decisions.py --no-plots # apenas CSVs, ignorar matplotlib
+Os métodos representam etapas progressivas de filtragem e são comparados
+sobre os mesmos dados.
 """
 
 import argparse
@@ -57,12 +37,8 @@ METHODS = [
     ("median_hysteresis_persistence", "median_hysteresis_persistence_room", "median_hysteresis_persistence_changed"),
 ]
 FINAL_METHOD = "median_hysteresis_persistence"
-
-# Shown once in run_metadata whenever at least one (mac, experiment_id)
-# group used clock_source="node" - see _group_uses_node_time's docstring
-# for the full reasoning. Kept as a complete, citable sentence rather than
-# a bare boolean, since this is a real methodological caveat for whatever
-# report cites these numbers, not just an internal implementation note.
+# Indica em run_metadata se algum grupo usou clock_source="node".
+# Ver _group_uses_node_time() para a justificação metodológica.
 NODE_TIME_CLOCK_WARNING = (
     "Pelo menos um grupo (mac, experiment_id) nesta corrida usou node_time "
     "(relógio do próprio nó, sincronizado por NTP) em vez da hora de "
@@ -81,25 +57,16 @@ NODE_TIME_CLOCK_WARNING = (
 def normalize_mac(mac):
     return mac.replace("-", ":").lower().strip().replace('"', "")
 
-
-# Convenção de nomenclatura do protocolo de 75 ensaios: EST-<posição>-R<n>
-# para estáticos, DIN-<rota>-R<n> para dinâmicos (ex. "EST-A1-R3"). Maiúsculas
-# estritas - um erro de maiúsculas deve ficar sinalizado como aviso (ver
-# batch_analyze_experiments.py), não "corrigido" em silêncio.
-# \d* depois de EST/DIN aceita variantes de campanha como EST2-/DIN2- (nova
-# aquisição), sem exigir uma lista fechada de sufixos - qualquer geração
-# futura (EST3, DIN4, ...) já fica reconhecida sem voltar a mexer aqui.
-# [-–] aceita tanto hífen normal como travessão (U+2013) como separador -
-# encontrado repetidamente em campanhas reais (autocorreção do teclado do
-# telemóvel ao registar o experiment_id), nunca um erro de dados em si, só
-# um caractere diferente do esperado.
+# Convenção dos experiment_id: EST-<posição>-R<n> para estáticos e
+# DIN-<rota>-R<n> para dinâmicos.
+# Aceita variantes EST2/DIN2 e hífen normal ou travessão como separador.
 TRIAL_LABEL_PATTERN = re.compile(r"^(EST|DIN)\d*[-–]([A-Z0-9]+)[-–]R(\d+)$")
 
 
 def parse_trial_label(experiment_id):
-    """(trial_type, trial_position) derivados do experiment_id - nunca
-    guardado em Mongo, coluna derivada como clock_source/effective_time.
-    Tolerante: fora do padrão devolve (None, None), nunca levanta erro."""
+    """Deriva trial_type e trial_position a partir do experiment_id.
+    Devolve (None, None) quando o identificador não segue o padrão esperado.
+    """
     if not experiment_id:
         return None, None
     match = TRIAL_LABEL_PATTERN.match(experiment_id)
@@ -123,10 +90,8 @@ def load_detections_by_mac(collection, experiment_id, macs):
     for mac in target_macs:
         mac_query = dict(query)
         mac_query["mac"] = mac
-        # Sort by server time then _id: batch_id is a random uuid4 (not a
-        # chronological key), while Mongo's ObjectId is monotonically
-        # increasing at insertion time, giving a true fine-grained tiebreaker
-        # for detections that share the same (1-second-resolution) "time".
+        # Ordena por tempo do servidor e _id; o ObjectId serve de desempate
+        # cronológico quando várias deteções têm o mesmo timestamp.
         docs = list(
             collection.find(
                 mac_query,
@@ -140,9 +105,8 @@ def load_detections_by_mac(collection, experiment_id, macs):
 
 
 def load_ground_truth_by_mac(collection, experiment_id, macs):
-    """Mesmo formato de consulta que o load_detections_by_mac, mas contra a
-    coleção ground_truth - eventos "o beacon X entrou na sala Y à hora T" 
-    selecionados manualmente, uma linha por seleção de campo."""
+    """Carrega eventos de ground truth selecionados manualmente,
+    com uma entrada por mudança de sala do beacon."""
     query = {}
     if experiment_id is not None:
         query["experiment_id"] = experiment_id
@@ -161,11 +125,10 @@ def load_ground_truth_by_mac(collection, experiment_id, macs):
 
 
 def build_ground_truth_intervals(events):
-    """Emparelha eventos consecutivos de referência em intervalos: intervalo_i =
-    [evento_i.tempo, evento_{i+1}.tempo], com o intervalo do último evento deixado
-    em aberto (fim=Nenhum). Agrupa por experiment_id FIRST - essencial, uma vez que
-    dois ensaios diferentes reutilizando o mesmo MAC nunca devem ter os seus eventos
-    emparelhados entre experiências. Retorna {experiment_id: [intervalo, ...]}."""
+    """Converte eventos consecutivos de ground truth em intervalos temporais.
+        Os eventos são agrupados por experiment_id para evitar cruzar dados
+        de ensaios diferentes que utilizem o mesmo MAC.
+        """
     by_experiment = {}
     for ev in events:
         by_experiment.setdefault(ev.get("experiment_id"), []).append(ev)
@@ -181,14 +144,11 @@ def build_ground_truth_intervals(events):
 
 
 def lookup_ground_truth_interval(intervals, time_str):
-    """Comparação de strings simples - segura porque "%Y-%m-%d %H:%M:%S" é um
-    formato de largura fixa, preenchido com zeros, que classifica/compara corretamente como strings simples,
-    de forma consistente com a forma como este ficheiro já evita a análise de data e hora
-    noutros lugares. Devolve o INTERVALO completo ({"room","scenario","start","end"})
-    que cobre time_str, ou None se estiver fora de todos os intervalos (por ex.
-    antes da primeira marcação, ou sem ground truth nenhum) - devolver o
-    intervalo inteiro, em vez de só a sala, serve room E scenario a partir
-    de UMA única passagem O(n), em vez de dois varrimentos separados."""
+    """Devolve o intervalo de ground truth que contém time_str.
+        Os timestamps usam um formato fixo e preenchido com zeros, pelo que
+        podem ser comparados diretamente como strings. O intervalo completo
+        inclui room e scenario. Devolve None quando não há correspondência.
+        """
     if not time_str:
         return None
     for interval in intervals:
@@ -198,30 +158,15 @@ def lookup_ground_truth_interval(intervals, time_str):
 
 
 def _group_uses_node_time(docs):
-    """True só se TODAS as deteções deste grupo (mac, experiment_id)
-    tiverem node_time E vierem todas do MESMO esp_id - duas condições, não
-    uma. Decisão por CONJUNTO, nunca por linha: se node_time faltar nalguma
-    linha, o grupo inteiro recua para a hora de receção.
+    """Usa node_time apenas quando todas as deteções do grupo pertencem ao mesmo
+    esp_id e possuem node_time válido.
 
-    Porquê também exigir um único esp_id (não só node_time em todas as
-    linhas): a ordem de base do detail_df continua sempre por hora de
-    receção (nunca por node_time), e é essa MESMA ordem que alimenta tanto
-    decision_methods.py (changed/decisões) como, a seguir, o metrics.py
-    (transições/latências) - as duas têm de usar a mesma ordem, ou
-    "changed" deixa de corresponder à linha anterior real. Isso só é
-    seguro quando a ordem de receção e a ordem do próprio nó COINCIDEM -
-    garantido para um único esp_id (um dispositivo só gera e envia as
-    suas leituras em sequência), não garantido quando vários nós reportam
-    o mesmo beacon com atrasos de rede diferentes. Alargar a vários nós
-    exigiria também mudar a ordem que alimenta decision_methods.py - fora
-    de âmbito aqui, fica só a acumular node_time/node_seq/boot_id para
-    esse trabalho futuro.
+    Caso contrário, o grupo utiliza o tempo de receção do servidor, garantindo
+    uma ordenação consistente entre os métodos de decisão e o cálculo de métricas.
 
-    Nota sobre validade adicional: comparar o relógio do nó com o do
-    ground_truth (sempre o relógio do servidor) só é correto se o próprio
-    relógio do SERVIDOR também estiver certo - não verificado nem
-    garantido por este código (ver limitação no README, e
-    NODE_TIME_CLOCK_WARNING em run_metadata)."""
+    A comparação com o ground truth assume ainda que o relógio do servidor está
+    corretamente sincronizado.
+    """
     if not docs:
         return False
     if not all(d.get("node_time") is not None for d in docs):
@@ -230,10 +175,9 @@ def _group_uses_node_time(docs):
 
 
 def build_detail_dataframe(mac, docs, hysteresis_margin, median_window_sec, persistence_streak, gt_intervals_by_experiment):
-    # Escolha do relógio por CONJUNTO (mac, experiment_id), calculada ANTES
-    # das funções de decisão (não depois, como antes desta correção) - agora
-    # precisamos de "effective_time" já disponível para alimentar a janela
-    # temporal de decide_median_windowed(). Ver _group_uses_node_time.
+    # Define o relógio efetivo por grupo (mac, experiment_id) antes das funções
+    # de decisão, para que a janela temporal use o effective_time correto.
+    # Ver _group_uses_node_time().
     docs_by_experiment = {}
     for doc in docs:
         docs_by_experiment.setdefault(doc.get("experiment_id"), []).append(doc)
@@ -246,9 +190,7 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window_sec, pers
     ]
 
     baseline = dm.decide_baseline(docs)
-    # Lista derivada minima {"room","rssi","time"} para as funções offline
-    # com janela temporal - não muta docs (que mantém o seu próprio "time" de
-    # receção, usado mais abaixo na própria linha de saída).
+    # Dados mínimos usados pelas funções offline com janela temporal.
     windowed_input = [
         {"room": doc.get("room"), "rssi": doc.get("rssi"), "time": t}
         for doc, t in zip(docs, effective_times)
@@ -275,9 +217,8 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window_sec, pers
         )
         experiment_id = doc.get("experiment_id")
         uses_node_time = uses_node_time_by_experiment.get(experiment_id, False)
-        # Looked up per-row using THIS row's own experiment_id, not the CLI
-        # filter - in "all experiments" mode a single mac's docs can span
-        # more than one trial.
+        # Usa o experiment_id da própria linha, permitindo analisar vários ensaios
+        # do mesmo MAC numa única execução.
         intervals = gt_intervals_by_experiment.get(experiment_id, [])
         gt_interval = lookup_ground_truth_interval(intervals, effective_time)
         ground_truth_room = gt_interval["room"] if gt_interval else None
@@ -322,16 +263,11 @@ def build_detail_dataframe(mac, docs, hysteresis_margin, median_window_sec, pers
 
 
 def _records_with_none(df):
-    """df.to_dict("records") followed by a real NaN->None pass. Doing this
-    BEFORE to_dict (e.g. df.where(df.notna(), None)) does not work for a
-    float64-dtype column: pandas silently coerces the replacement None
-    right back into NaN to preserve the column's numeric dtype, so a
-    method's room column that happens to be entirely None over some slice
-    (e.g. a persistence-only warm-up subset) would still surface as float
-    NaN, not Python None, downstream - breaking "is None" checks in
-    metrics.py and unorderable sort comparisons in build_confusion_counts.
-    Converting after to_dict (plain Python dicts, no dtype to preserve) is
-    the reliable way to do this instead."""
+    """Converte o DataFrame para registos e substitui NaN por None.
+    A conversão é feita depois de to_dict(), porque o pandas pode manter NaN
+    em colunas numéricas mesmo quando se tenta substituir por None no DataFrame.
+    Isto garante compatibilidade com verificações `is None` nas métricas.
+    """
     records = df.to_dict("records")
     for record in records:
         for key, value in record.items():
@@ -341,13 +277,10 @@ def _records_with_none(df):
 
 
 def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
-    """Returns (summary_rows, transition_latency_rows). transition_latency_rows
-    is real-Mongo-sourced per-transition detail (transition instant + each
-    method's confirmation instant, never reconstructed from a CSV column
-    change - no BASELINE_LATENCY_CAVEAT-style artifact), popped out of
-    metrics.compute_ground_truth_metrics's return dict before it's spread
-    into a summary row - decision_summary_<label>.csv's columns are
-    unaffected by this."""
+    """Devolve as linhas de resumo e os detalhes de latência das transições.
+    As latências são obtidas diretamente dos eventos de ground truth e das
+    confirmações dos métodos, sem reconstrução a partir das alterações no CSV.
+    """
     summary_rows = []
     transition_latency_rows = []
 
@@ -362,16 +295,13 @@ def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
         num_decided = int(decided_mask.sum())
         first_decision_index = int(decided_mask.idxmax()) if num_decided > 0 else None
 
-        # "changed" marks any row whose decision differs from the previous
-        # row's, including the very first decision being "established" out
-        # of None. num_transitions excludes that first establishment, since
-        # it isn't a transition between two known rooms.
+        # "changed" inclui o estabelecimento da primeira decisão a partir de None.
+        # num_transitions conta apenas mudanças entre salas já conhecidas.  
         num_changed_true = int(changed.sum())
         num_transitions = max(0, num_changed_true - (1 if num_decided > 0 else 0))
 
-        # Agreement is measured against the final (most-filtered) stage in
-        # the chain, not an all-pairs matrix - the four configurations are
-        # progressive refinements of each other, not independent alternatives.
+        # A concordância é medida relativamente ao método mais filtrado,
+        # refletindo a natureza progressiva das quatro configurações.
         both_decided = decided_mask & final_rooms.notna()
         if method == FINAL_METHOD:
             agree_rate_vs_final = 1.0 if both_decided.sum() > 0 else None
@@ -380,25 +310,17 @@ def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
         else:
             agree_rate_vs_final = None
 
-        # Ground-truth-based metrics (accuracy, false/missed movements,
-        # confirmation latency, % time unknown/transition) - see metrics.py.
-        # Reuses first_decision_index computed above so the "establishing
-        # the first decision isn't a movement" rule can never drift between
-        # num_transitions and the false-movement count.
-        # Uses effective_time (node clock when the whole group qualifies,
-        # else receipt time - see _group_uses_node_time), renamed back to
-        # "time" for metrics.py. No reordering needed: _group_uses_node_time
-        # already guarantees receipt order and node order coincide whenever
-        # clock_source="node", so this stays in detail_df's own row order,
-        # the same order decision_methods.py already processed.
+        # Calcula as métricas baseadas em ground truth: exatidão, movimentos falsos
+        # e perdidos, latência de confirmação e tempo em estado desconhecido/transição.
+        # Usa effective_time e reutiliza first_decision_index para manter consistência
+        # com a contagem de transições.
         method_rows = detail_df[["effective_time", "experiment_id", "ground_truth_room", room_col, changed_col]]
         method_rows = method_rows.rename(columns={"effective_time": "time", room_col: "estimated_room", changed_col: "changed"})
         gt_metrics = metrics.compute_ground_truth_metrics(
             _records_with_none(method_rows), gt_intervals_by_experiment, first_decision_index
         )
-        # Must be popped BEFORE gt_metrics is spread into the summary row
-        # below - otherwise decision_summary_<label>.csv would gain a
-        # column holding a serialized list instead of a scalar.
+        # Remove os detalhes das transições antes de criar a linha de resumo,
+        # evitando guardar uma lista numa coluna do decision_summary.
         transition_details = gt_metrics.pop("transition_details", [])
         for detail in transition_details:
             transition_latency_rows.append({"mac": mac, "method": method, **detail})
@@ -418,9 +340,11 @@ def build_summary_rows(mac, detail_df, gt_intervals_by_experiment):
 
 
 def build_confusion_rows(mac, detail_df):
-    """One row per (mac, method, real_room, estimated_room) with a count,
-    built only from rows with ground-truth coverage. Long/tidy format -
-    easy to pivot into a real matrix per method afterwards in pandas/Excel."""
+    """Cria uma linha por combinação (mac, method, real_room, estimated_room),
+    usando apenas registos com ground truth disponível.
+    O resultado fica em formato longo, podendo depois ser convertido numa
+    matriz de confusão por método.
+    """
     confusion_rows = []
     gt_covered = detail_df[detail_df["ground_truth_room"].notna()]
     for method, room_col, _ in METHODS:
@@ -431,14 +355,10 @@ def build_confusion_rows(mac, detail_df):
 
 
 def load_node_seq_by_esp(collection, experiment_id):
-    """{(esp_id, boot_id): [node_seq, ...]} - uma entrada por LOTE (esp_id,
-    batch_id) distinto, não por linha de raw_detections (várias linhas
-    partilham o mesmo node_seq quando o mesmo lote viu vários beacons).
-    node_seq é propriedade do NÓ, não do beacon - por isso esta função
-    trabalha diretamente sobre a coleção, independente de data_by_mac.
-    Linhas com boot_id em falta (dados antigos, anteriores a esta
-    funcionalidade) ficam de fora - sem boot_id não há forma segura de
-    saber a que sessão pertencem."""
+    """Agrupa os node_seq por (esp_id, boot_id), considerando cada lote apenas uma vez.
+    Linhas sem boot_id são ignoradas, porque não é possível associá-las de forma
+    segura a uma sessão de arranque.
+    """
     query = {"node_seq": {"$ne": None}, "boot_id": {"$ne": None}}
     if experiment_id is not None:
         query["experiment_id"] = experiment_id
@@ -455,13 +375,11 @@ def load_node_seq_by_esp(collection, experiment_id):
 
 
 def compute_node_seq_gaps(seqs_by_esp_boot):
-    """Ordena por node_seq DENTRO DE CADA (esp_id, boot_id) e conta saltos/
-    duplicados - nunca entre sessões diferentes do mesmo nó (node_seq
-    reinicia a cada arranque do firmware, por isso duas sessões podem
-    partilhar números por coincidência). Devolve
-    {esp_id: [{"boot_id", "num_batches_seen", "num_duplicates", "num_gaps",
-    "num_missing_estimated", "seq_min", "seq_max"}, ...]} - uma entrada por
-    sessão de arranque, agrupadas por esp_id só para leitura mais fácil."""
+    """Analisa node_seq por sessão (esp_id, boot_id), identificando duplicados
+    e saltos na sequência.
+    Cada sessão é tratada separadamente, uma vez que node_seq reinicia após
+    um novo arranque do firmware.
+    """
     result = {}
     for (esp_id, boot_id), seqs in seqs_by_esp_boot.items():
         ordered = sorted(seqs)
@@ -482,12 +400,10 @@ def compute_node_seq_gaps(seqs_by_esp_boot):
 
 
 def load_acquisition_config_by_esp(collection, experiment_id):
-    """{(experiment_id, esp_id): {"scan_duration_sec": {valores...}, "upload_interval_ms": {valores...}}}
-    - conjunto de valores efetivos DISTINTOS observados em raw_detections
-    (guião secção 7), por esp_id, dentro de cada experiment_id. Linhas sem
-    nenhum dos dois campos (dados anteriores a esta funcionalidade, ou
-    formato antigo) ficam simplesmente ausentes dos conjuntos - não tratadas
-    como um terceiro valor "desconhecido"."""
+    """Recolhe os valores efetivos de scan_duration_sec e upload_interval_ms
+    por experiment_id e esp_id.
+        Registos sem estes campos são ignorados.
+    """
     query = {"$or": [{"scan_duration_sec": {"$ne": None}}, {"upload_interval_ms": {"$ne": None}}]}
     if experiment_id is not None:
         query["experiment_id"] = experiment_id
@@ -506,29 +422,13 @@ def load_acquisition_config_by_esp(collection, experiment_id):
 
 
 def compute_acquisition_config_divergence(config_by_esp, acquisition_by_experiment):
-    """Duas verificações independentes, por (experiment_id, campo) em
-    scan_duration_sec/upload_interval_ms:
-
-    (a) Consistência interna por esp_id: mais do que um valor efetivo
-        distinto para o MESMO esp_id dentro do MESMO experiment_id nunca
-        pode ser intencional (é o mesmo nó físico, no mesmo ensaio) -
-        sinalizado sempre que acontece.
-    (b) Frota vs. registado: só é comparável quando TODOS os esp_id que
-        contribuíram um valor limpo (exatamente 1 valor observado) nesse
-        experiment_id concordam entre si (frota homogénea). Comparar um
-        único valor registado em `experiments` contra uma frota
-        deliberadamente heterogénea (configuração por esp_id a ser usada
-        para dar valores diferentes a nós diferentes) acusaria falsamente o
-        nó cujo valor é, por desenho, diferente dos outros - por isso, nesse
-        caso, esta função não compara com o registado, devolve só a
-        distribuição por esp_id como informação.
-
-    Devolve {experiment_id: {"warnings": [frase citável, ...], "fleet":
-    {campo: {"homogeneous", "effective_value", "registered_value",
-    "diverges_from_registered", "by_esp_id"}}}} - um registo por
-    experiment_id com alguns dados de configuração em raw_detections;
-    inteiramente {} quando esta corrida não tem nenhum (ex: dados anteriores
-    à funcionalidade)."""
+    """Valida a consistência da configuração de aquisição por experiment_id.
+    Verifica:
+    1. se cada esp_id mantém um único valor efetivo durante o ensaio;
+    2. se uma frota homogénea coincide com a configuração registada.
+    Quando a frota tem configurações diferentes por esp_id, apenas é reportada
+    a distribuição observada, sem comparação direta com o valor registado.
+    """
     by_experiment = {}
     for (experiment_id, esp_id), field_sets in config_by_esp.items():
         by_experiment.setdefault(experiment_id, {})[esp_id] = field_sets
@@ -670,10 +570,8 @@ def main():
         return
 
     if args.min_rssi is not None:
-        # Drops rows outright (not just their rssi) - filters ALL FOUR
-        # methods' working set, not only the median-based ones. This changes
-        # the effective row count of the detail CSV; it's recorded below in
-        # run_metadata, not silent.
+        # Remove as linhas que não cumprem o filtro de RSSI em todos os métodos.
+        # A redução do número de registos é registada em run_metadata.
         data_by_mac = {mac: dm.filter_min_rssi(docs, args.min_rssi) for mac, docs in data_by_mac.items()}
 
     print(f"A carregar ground_truth (experiment_id={args.experiment_id!r})...")
@@ -737,18 +635,13 @@ def main():
 
     combined_detail.to_csv(detail_csv, index=False)
     pd.DataFrame(all_summary_rows).to_csv(summary_csv, index=False)
-    # Explicit columns=... even when all_confusion_rows is empty (no ground
-    # truth at all in this run) - otherwise pd.DataFrame([]) has NO columns,
-    # writing a truly headerless CSV instead of a header-only one, which
-    # would break anything downstream expecting these column names to exist.
+    # Define explicitamente as colunas mesmo quando não existem dados de ground truth,
+    # garantindo que o CSV mantém o cabeçalho esperado.
     pd.DataFrame(
         all_confusion_rows, columns=["mac", "method", "real_room", "estimated_room", "count"]
     ).to_csv(confusion_csv, index=False)
-    # Real Mongo-sourced per-transition latencies (transition instant + each
-    # method's confirmation instant), consumed by generate_report_figures.py's
-    # latency-boxplot and rssi-timeline figures - never reconstructed from a
-    # CSV column change, so free of the baseline-artifact caveat that
-    # statistical_analysis.py's --pertransition mode has to carry.
+    # Latências por transição obtidas diretamente dos dados do MongoDB,
+    # usadas nas figuras de latência e timelines.
     pd.DataFrame(
         all_transition_latency_rows,
         columns=["mac", "method", "experiment_id", "transition_index", "new_room",
@@ -757,11 +650,8 @@ def main():
                  "premature_lead_sec", "transition_status"],
     ).to_csv(transition_latencies_csv, index=False)
 
-    # Acquisition parameters (scan duration/interval, firmware RSSI cutoff)
-    # were registered separately per experiment_id via POST /api/experiment,
-    # at collection time - keyed here by every experiment_id actually present
-    # in the processed data (not just args.experiment_id, since "all
-    # experiments" mode can mix several trials).
+    # Carrega os parâmetros de aquisição registados para cada experiment_id
+    # presente nos dados processados.
     distinct_experiment_ids = sorted(
         e for e in combined_detail["experiment_id"].dropna().unique()
     )
@@ -770,24 +660,17 @@ def main():
         for exp_id in distinct_experiment_ids
     }
 
-    # Offline missing/duplicate-batch detection (guião secção 3) - reads
-    # node_seq directly from raw_detections, independent of data_by_mac
-    # (node_seq is a property of the node, not the beacon). Complements the
-    # live, console-only check in app.py with citable numbers here.
+    # Deteta offline gaps e duplicados em node_seq diretamente em raw_detections,
+    # complementando a verificação em tempo real feita em app.py.
     node_seq_gap_summary = compute_node_seq_gaps(load_node_seq_by_esp(raw_detections, args.experiment_id))
 
-    # Guião secção 7: acquisition config (scan_duration_sec/upload_interval_ms)
-    # divergence, both within a node across the same trial and between the
-    # fleet's effective config and what was registered in `experiments` - see
-    # compute_acquisition_config_divergence's docstring for why these are two
-    # separate checks, not one.
+    # Verifica a consistência dos parâmetros de aquisição dentro de cada ensaio
+    # e a sua correspondência com a configuração registada em experiments.
     acquisition_config_divergence = compute_acquisition_config_divergence(
         load_acquisition_config_by_esp(raw_detections, args.experiment_id), acquisition_by_experiment,
     )
 
-    # See NODE_TIME_CLOCK_WARNING's own comment - this stays None (no
-    # warning at all) unless at least one processed group actually used
-    # clock_source="node".
+    # Define o aviso apenas quando algum grupo processado utiliza clock_source="node".
     node_time_clock_warning = (
         NODE_TIME_CLOCK_WARNING if (combined_detail["clock_source"] == "node").any() else None
     )

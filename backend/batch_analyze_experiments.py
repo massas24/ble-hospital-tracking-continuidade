@@ -1,22 +1,13 @@
 """
-Orquestra analyze_room_decisions.py por subprocesso, um por experiment_id,
-para processar em lote o protocolo de 75 ensaios do Prof. Carreto (11
-posições estáticas x 5 repetições + 2 percursos x 10 repetições) sem correr
-cada um à mão. Replica o padrão de subprocesso/caminhos previsíveis já
-provado em sweep_parameter.py - aqui os 3 parâmetros de decisão ficam
-FIXOS (mesmos valores para todos os ensaios), o que varia é o experiment_id,
-não um parâmetro de decisão (propósito diferente de sweep_parameter.py,
-mesmo mecanismo).
+Executa analyze_room_decisions.py em lote para vários experiment_id,
+mantendo fixos os parâmetros de decisão.
 
-Convenção de nomenclatura esperada (ver analyze_room_decisions.
-parse_trial_label): EST-<posição>-R<repetição> / DIN-<rota>-R<repetição>.
+Permite processar campanhas estáticas e dinâmicas através de listas
+explícitas de ensaios ou descoberta por prefixo.
 
-Uso:
-  python batch_analyze_experiments.py --label campanha1 \\
-      --discover-prefix EST- DIN- --mac aa:bb:cc:dd:ee:01
-
-  python batch_analyze_experiments.py --label campanha1 \\
-      --experiment-ids EST-A1-R1 EST-A1-R2 DIN-AB-R1 --mac aa:bb:cc:dd:ee:01
+Convenção esperada:
+EST-<posição>-R<repetição>
+DIN-<rota>-R<repetição>
 """
 import argparse
 import json
@@ -29,8 +20,7 @@ from pymongo import MongoClient
 
 from analyze_room_decisions import parse_trial_label
 
-# Soleiras de porta, sem sala verdadeira definível - a única situação onde
-# a ausência de ground truth é esperada por desenho, não um esquecimento.
+# Soleiras de porta sem ground truth definido por desenho experimental.
 NO_GROUND_TRUTH_EXPECTED_POSITIONS = {"P1", "P2"}
 
 
