@@ -1,0 +1,134 @@
+{
+  "run_timestamp": "2026-09-02 19:38:17",
+  "experiment_id_filter": "EST2-B3-R1",
+  "mac_filter": [
+    "c3:00:00:13:3b:b7",
+    "c3:00:00:13:3c:1e",
+    "c3:00:00:13:3b:f2"
+  ],
+  "resolved_macs": [
+    "c3:00:00:13:3b:b7",
+    "c3:00:00:13:3b:f2",
+    "c3:00:00:13:3c:1e"
+  ],
+  "analysis_parameters": {
+    "hysteresis_margin": 5.0,
+    "median_window_sec": 3.0,
+    "persistence_streak": 2,
+    "min_rssi": null
+  },
+  "output_files": {
+    "detail_csv": "batch_output_multibeacon\\EST2-B3-R1\\raw_with_decisions_EST2-B3-R1.csv",
+    "summary_csv": "batch_output_multibeacon\\EST2-B3-R1\\decision_summary_EST2-B3-R1.csv",
+    "confusion_csv": "batch_output_multibeacon\\EST2-B3-R1\\confusion_matrix_EST2-B3-R1.csv",
+    "plots_dir": null
+  },
+  "acquisition_parameters_by_experiment": {
+    "EST2-B3-R1": {
+      "experiment_id": "EST2-B3-R1",
+      "created_at": "2026-08-27 10:34:54"
+    }
+  },
+  "ground_truth_summary": {
+    "c3:00:00:13:3b:b7": {
+      "events_loaded": 1,
+      "rows_with_ground_truth": 37,
+      "rows_total": 39
+    },
+    "c3:00:00:13:3c:1e": {
+      "events_loaded": 0,
+      "rows_with_ground_truth": 0,
+      "rows_total": 39
+    },
+    "c3:00:00:13:3b:f2": {
+      "events_loaded": 0,
+      "rows_with_ground_truth": 0,
+      "rows_total": 39
+    }
+  },
+  "node_time_summary": {
+    "c3:00:00:13:3b:b7": {
+      "rows_with_node_seq": 39,
+      "rows_with_node_time": 39,
+      "rows_total": 39,
+      "experiments_using_node_time": []
+    },
+    "c3:00:00:13:3c:1e": {
+      "rows_with_node_seq": 39,
+      "rows_with_node_time": 39,
+      "rows_total": 39,
+      "experiments_using_node_time": []
+    },
+    "c3:00:00:13:3b:f2": {
+      "rows_with_node_seq": 39,
+      "rows_with_node_time": 39,
+      "rows_total": 39,
+      "experiments_using_node_time": []
+    }
+  },
+  "node_seq_gap_summary": {
+    "ESP-01": [
+      {
+        "boot_id": 2803322551,
+        "num_batches_seen": 13,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 1394,
+        "seq_max": 1406
+      }
+    ],
+    "ESP-02": [
+      {
+        "boot_id": 49404702,
+        "num_batches_seen": 13,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 264,
+        "seq_max": 276
+      }
+    ],
+    "ESP-03": [
+      {
+        "boot_id": 2780215821,
+        "num_batches_seen": 13,
+        "num_duplicates": 0,
+        "num_gaps": 0,
+        "num_missing_estimated": 0,
+        "seq_min": 1539,
+        "seq_max": 1551
+      }
+    ]
+  },
+  "node_time_clock_warning": null,
+  "acquisition_config_divergence": {
+    "EST2-B3-R1": {
+      "warnings": [],
+      "fleet": {
+        "scan_duration_sec": {
+          "homogeneous": true,
+          "effective_value": 2,
+          "registered_value": null,
+          "diverges_from_registered": false,
+          "by_esp_id": {
+            "ESP-01": 2,
+            "ESP-02": 2,
+            "ESP-03": 2
+          }
+        },
+        "upload_interval_ms": {
+          "homogeneous": true,
+          "effective_value": 1000,
+          "registered_value": null,
+          "diverges_from_registered": false,
+          "by_esp_id": {
+            "ESP-01": 1000,
+            "ESP-02": 1000,
+            "ESP-03": 1000
+          }
+        }
+      }
+    }
+  }
+}

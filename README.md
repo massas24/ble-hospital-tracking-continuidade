@@ -119,6 +119,10 @@ A resposta de `GET`/`POST /api/experiment` inclui também:
 
 **`scenario`** (guião secção 9, "Comparação por cenário") — um de `centro_sala`, `junto_parede`, `junto_porta`, `movimento` (não validado no servidor, campo livre como o `note`). Corresponde a 4 dos 5 cenários do guião — falta "Vários beacons" de propósito: essa é uma condição do **ensaio inteiro** (quantos beacons ativos em simultâneo), não algo por marcação, já fica implícita em quantos beacons estão na whitelist durante o ensaio.
 
+Os 3 MACs da whitelist estiveram sempre ativos em simultâneo ao longo de toda a campanha (55 ensaios estáticos + 20 dinâmicos) — **condição presente em toda a campanha final: três beacons BLE simultaneamente ativos. Os resultados globais foram obtidos sob esta condição. Como não existe uma condição single-beacon de controlo, não é possível isolar o efeito do número de beacons.** A linha "Vários beacons" da tabela do guião remete por isso para a própria tabela global (secção 4) — nunca uma exatidão duplicada a fingir de ensaio próprio. O que existe, como caracterização descritiva complementar (`generate_report_figures.py multi-beacon-distribution`, secção 4): os três MACs apresentaram números totais de deteções semelhantes, indicando que nenhum beacon ficou sistematicamente ausente da recolha — e, para os dois beacons que permaneceram fisicamente parados durante toda a campanha, a distribuição da sala decidida ao longo do tempo. Ambos estavam posicionados **junto à fronteira Sala A/Corredor por desenho do ensaio**; a distribuição concentra-se por isso sobretudo entre Sala A e Corredor, coerente com a ambiguidade espacial já documentada para a posição de fronteira P1 (`doorway-distribution`) — **não é instabilidade nem degradação do sistema, é o comportamento esperado nessa posição**. Não existe ground truth discreto adequado para estes dois beacons nesta campanha, por isso não se reporta exatidão convencional para eles.
+
+**Validação/afinação da cadência de aquisição** — a figura `validacao_comparacao_aquisicao_pilotos.png` é uma comparação exploratória da fase de validação, com seis repetições por condição; não representa uma comparação independente da campanha dinâmica final. As seis repetições da aquisição final foram posteriormente integradas nessa campanha final.
+
 **Nota metodológica importante sobre `scenario`**: aplica-se a **todo o intervalo até à próxima marcação**, não a uma leitura isolada — exatamente como já acontece com a sala (`ground_truth_room`). Se tocares "Corredor / Centro da sala" e depois andares até à porta sem tocar de novo, todas as leituras nesse intervalo (mesmo já perto da porta) ficam etiquetadas "Centro da sala". **Para a comparação por cenário da secção 9 fazer sentido, tens de tocar sempre que mudas de cenário — mesmo que a sala não mude.**
 
 Ver secção 2 para a página do dashboard que faz isto na prática (`/ground-truth`). Os intervalos de ground truth (`"esteve em X entre T1 e T2"`) são derivados só na análise offline (secção 4), emparelhando eventos consecutivos do mesmo ensaio — não ficam guardados como intervalos na BD.
@@ -295,3 +299,21 @@ Usa o `mock_mirth.py` + `MIRTH_URL` (secção 4) para testar sem depender da red
 
 **ESP32 não regista deteções novas / valores presos no dashboard**
 Confirma com dois `curl.exe` seguidos a `/api/all-beacons` se o `time` de cada beacon está mesmo a mudar — se estiver idêntico, o problema é o ESP32 não estar a enviar (`POST /api/bledata`), não o frontend. Verifica o Serial Monitor do ESP32.
+
+---
+
+## 6. Limitações conhecidas da instalação
+
+**ESP-03 (Sala B) montado sobre uma obstrução física.** Inspeção física ao local, com fotografia, confirmou que o ESP-03 está montado sobre uma pilha de caixotes empilhados, num recanto de arrumação dentro da Sala B — não numa posição central e desobstruída como os outros dois nós. Esta é a causa confirmada por observação direta, não uma suspeita.
+
+Como contexto (não como prova causal — o RSSI agregado depende de vários fatores além da posição do próprio nó, incluindo onde estavam os outros beacons a cada instante): o RSSI mediano do ESP-03, com os 3 beacons whitelisted a pesar igualmente, fica sistematicamente mais fraco do que o dos outros dois nós, mesmo dentro da própria Sala B:
+
+| posição | ESP-01 (Corredor) | ESP-02 (Sala A) | ESP-03 (Sala B) |
+|---|---|---|---|
+| B1 (centro) | -76 dBm | -72 dBm | -83 dBm |
+| B2 (porta) | -77 dBm | -74 dBm | -83 dBm |
+| B3 (parede) | -78 dBm | -75 dBm | -84 dBm |
+
+A causa é a inspeção física; o padrão de RSSI é consistente com ela, não a substitui.
+
+**Não há plano de reinstalação do nó nem de repetição dos ensaios.** O espaço disponível no hospital para este nó não permite uma posição alternativa desobstruída — fica registada como limitação da instalação para o relatório final, não como algo a corrigir numa iteração futura.

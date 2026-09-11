@@ -48,7 +48,7 @@ const char* WIFI_PASSWORD = "";
 
 // IP do portátil onde o Flask corre, na mesma rede WiFi do ESP32, porta 5000.
 // Descobre com "ipconfig" no PowerShell (adaptador Wi-Fi, endereço IPv4).
-const char* SERVER_URL    = "http://172.29.132.20:5000/api/bledata";
+const char* SERVER_URL    = "http://172.29.134.107:5000/api/bledata";
 
 // Identificador único deste nó - tem de coincidir, carácter a carácter, com
 // o esp_id que registares no mapeamento de salas (dashboard ou

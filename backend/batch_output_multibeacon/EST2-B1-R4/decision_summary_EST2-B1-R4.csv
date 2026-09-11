@@ -1,0 +1,13 @@
+mac,method,num_detections,num_decided,num_transitions,first_decision_index,agree_rate_vs_final,accuracy,num_true_movements,num_missed_movements,missed_movement_rate,num_confirmed_after_transition,num_premature_before_transition,num_premature_without_confirmation,num_false_movements,false_movements_per_hour,latency_median_sec,latency_p95_sec,latency_iqr_sec,latency_min_sec,latency_max_sec,pct_time_unknown_or_transition
+c3:00:00:13:3b:b7,baseline,49,49,47,0,0.3404255319148936,0.375,0.0,0.0,,0.0,0.0,0.0,30.0,1661.5384615384617,,,,,,0.0
+c3:00:00:13:3b:b7,median,49,49,7,0,0.9148936170212766,0.9166666666666666,0.0,0.0,,0.0,0.0,0.0,3.0,166.15384615384616,,,,,,0.0
+c3:00:00:13:3b:b7,median_hysteresis,49,49,7,0,0.9148936170212766,0.9166666666666666,0.0,0.0,,0.0,0.0,0.0,3.0,166.15384615384616,,,,,,0.0
+c3:00:00:13:3b:b7,median_hysteresis_persistence,49,47,2,2,1.0,0.9375,0.0,0.0,,0.0,0.0,0.0,1.0,55.38461538461539,,,,,,4.081632653061225
+c3:00:00:13:3c:1e,baseline,49,49,46,0,0.2916666666666667,,,,,,,,,,,,,,,0.0
+c3:00:00:13:3c:1e,median,49,49,7,0,0.7916666666666666,,,,,,,,,,,,,,,0.0
+c3:00:00:13:3c:1e,median_hysteresis,49,49,7,0,0.8541666666666666,,,,,,,,,,,,,,,0.0
+c3:00:00:13:3c:1e,median_hysteresis_persistence,49,48,7,1,1.0,,,,,,,,,,,,,,,2.0408163265306123
+c3:00:00:13:3b:f2,baseline,49,49,46,0,0.2916666666666667,,,,,,,,,,,,,,,0.0
+c3:00:00:13:3b:f2,median,49,49,13,0,0.6458333333333334,,,,,,,,,,,,,,,0.0
+c3:00:00:13:3b:f2,median_hysteresis,49,49,7,0,0.8541666666666666,,,,,,,,,,,,,,,0.0
+c3:00:00:13:3b:f2,median_hysteresis_persistence,49,48,7,1,1.0,,,,,,,,,,,,,,,2.0408163265306123

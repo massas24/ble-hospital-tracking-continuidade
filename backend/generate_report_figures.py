@@ -208,23 +208,33 @@ def _bar_figure(descriptive_csv, mac_arg, metric, ylabel, title, filename, outpu
         return
     _method_axis(ax)
     ax.set_ylabel(ylabel)
-    ax.set_title(f"{title} - {mac}")
+    # A campanha é o identificador primário da figura; o MAC permanece
+    # disponível como contexto, sem confundir campanhas distintas.
+    ax.set_title(f"{title}\nMAC: {mac}")
     ax.axhline(0, color="#333333", linewidth=0.8)
     _savefig(fig, os.path.join(output_dir, f"{filename}_{label}.png"))
 
 
 def cmd_accuracy_bar(args):
+    campaign_titles = {
+        "campanha_final_estaticos": "Exatidão da localização por método — campanha estática final",
+        "campanha_final_dinamicos": "Exatidão da localização por método — campanha dinâmica final",
+    }
     _bar_figure(
         args.descriptive_csv, args.mac, "accuracy",
-        "Exatidão", "Exatidão da localização por método",
+        "Exatidão", campaign_titles.get(args.label, "Exatidão da localização por método"),
         "barras_exatidao", args.output_dir, args.label,
     )
 
 
 def cmd_false_movements_bar(args):
+    campaign_titles = {
+        "campanha_final_estaticos": "Falsos movimentos por hora — campanha estática final",
+        "campanha_final_dinamicos": "Falsos movimentos por hora — campanha dinâmica final",
+    }
     _bar_figure(
         args.descriptive_csv, args.mac, "false_movements_per_hour",
-        "Falsos movimentos por hora", "Falsos movimentos por hora, por método",
+        "Falsos movimentos por hora", campaign_titles.get(args.label, "Falsos movimentos por hora, por método"),
         "barras_falsos_movimentos", args.output_dir, args.label,
     )
 
@@ -997,6 +1007,272 @@ def cmd_doorway_distribution(args):
     _savefig(fig, os.path.join(args.output_dir, f"tabela_fronteira_{args.label}.png"))
 
 
+def cmd_multi_beacon_distribution(args):
+    """Distribuição descritiva da sala decidida por MAC, ao longo de toda a
+    campanha - não uma exatidão (não há ground truth adequado para os
+    beacons sem posição discreta marcada). Serve de evidência para a linha
+    "Vários beacons" do guião (secção 9): condição presente em toda a
+    campanha final (três beacons BLE simultaneamente ativos, os resultados
+    globais foram obtidos sob esta condição); como não existe uma condição
+    single-beacon de controlo, não é possível isolar o efeito do número de
+    beacons. Só se reporta aqui contagem de deteções por MAC (números
+    semelhantes entre os 3 indicam que nenhum ficou sistematicamente
+    ausente da recolha) e, por MAC, a distribuição de sala decidida (mesma
+    lógica de cmd_doorway_distribution, agrupada por "mac" em vez de "trial_position").
+    """
+    warnings = check_consistent_analysis_parameters(args.detail_csv, prefix="raw_with_decisions_")
+    _print_warnings(warnings, "multi-beacon-distribution")
+    # require_ground_truth=False - os beacons de fundo não têm ground truth
+    # próprio nesta campanha, tal como P1/P2.
+    warnings = check_scenario_consistency(
+        args.detail_csv, column="mac", label="Beacons", require_ground_truth=False
+    )
+    _print_warnings(warnings, "multi-beacon-distribution")
+
+    frames = [pd.read_csv(p) for p in args.detail_csv]
+    combined = pd.concat(frames, ignore_index=True)
+
+    macs_present = sorted(combined["mac"].dropna().unique())
+    target_macs = args.macs if args.macs else macs_present
+    combined = combined[combined["mac"].isin(target_macs)]
+    if combined.empty:
+        _warn(f"multi-beacon-distribution: nenhuma linha para os MACs {target_macs} - a saltar.")
+        return
+
+    n_repetitions_overall = combined["experiment_id"].nunique()
+    concentration_by_mac = check_scenario_concentration(
+        combined, args.concentration_threshold, group_column="mac"
+    )
+    if n_repetitions_overall > 1:
+        for mac, info in concentration_by_mac.items():
+            if info["concentrated"]:
+                _warn(
+                    f"[multi-beacon-distribution] MAC {mac!r}: {info['by_experiment'][info['dominant_experiment']]}/"
+                    f"{info['total']} ({info['max_share'] * 100:.1f}%) vêm de uma única repetição "
+                    f"({info['dominant_experiment']}) - distribuição: {info['by_experiment']}"
+                )
+
+    macs = sorted(set(target_macs) & set(combined["mac"].unique()))
+    rows = []
+    mac_flags = {}  # mac -> "low_n" | "concentrated" | "both" | None
+    for mac in macs:
+        mac_df = combined[combined["mac"] == mac]
+        total_n = len(mac_df)  # total de deteções deste MAC na campanha - números semelhantes entre os 3 indicam que nenhum ficou sistematicamente ausente da recolha
+        low_n = 0 < total_n < args.min_observations
+        concentrated = n_repetitions_overall > 1 and concentration_by_mac.get(mac, {}).get("concentrated", False)
+        if low_n and concentrated:
+            mac_flags[mac] = "both"
+        elif low_n:
+            mac_flags[mac] = "low_n"
+        elif concentrated:
+            mac_flags[mac] = "concentrated"
+        info = concentration_by_mac.get(mac, {})
+
+        for method in METHODS:
+            decided_rooms = mac_df[f"{method}_room"].fillna(NO_DECISION_LABEL)
+            n_decided = int((decided_rooms != NO_DECISION_LABEL).sum())
+            counts = decided_rooms.value_counts()
+            for decided_room, n in counts.items():
+                n = int(n)
+                rows.append({
+                    "mac": mac,
+                    "method": method,
+                    "decided_room": decided_room,
+                    "n": n,
+                    "total_n": total_n,
+                    "pct_of_total": (n / total_n * 100.0) if total_n else None,
+                    "n_decided": n_decided,
+                    "pct_of_decided": (n / n_decided * 100.0) if (n_decided and decided_room != NO_DECISION_LABEL) else None,
+                    "low_n": low_n,
+                    "concentrated": concentrated,
+                    "dominant_experiment_id": info.get("dominant_experiment"),
+                    "dominant_experiment_share": info.get("max_share"),
+                })
+
+    if not rows:
+        _warn("multi-beacon-distribution: nada para reportar.")
+        return
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    csv_path = os.path.join(args.output_dir, f"distribuicao_multibeacon_{args.label}.csv")
+    out_df = pd.DataFrame(rows, columns=[
+        "mac", "method", "decided_room", "n", "total_n", "pct_of_total",
+        "n_decided", "pct_of_decided", "low_n", "concentrated",
+        "dominant_experiment_id", "dominant_experiment_share",
+    ])
+    out_df.to_csv(csv_path, index=False)
+    print(f"Distribuição multi-beacon escrita: {csv_path}")
+
+    header = ["MAC"] + [METHOD_LABELS_PT[m].replace("\n", " ") for m in METHODS]
+    fig_rows = []
+    flagged_rows = {}
+    for row_idx, mac in enumerate(macs):
+        flag = mac_flags.get(mac)
+        if flag:
+            flagged_rows[row_idx] = flag
+        mac_total = out_df.loc[out_df["mac"] == mac, "total_n"].iloc[0]
+        label_marker = ("*" if flag in ("low_n", "both") else "") + ("†" if flag in ("concentrated", "both") else "")
+        row_label = f"{mac} (n={mac_total})" + (f" {label_marker}" if label_marker else "")
+        row = [row_label]
+        for method in METHODS:
+            method_rows = out_df[(out_df["mac"] == mac) & (out_df["method"] == method)]
+            method_rows = method_rows.sort_values("pct_of_total", ascending=False)
+            cell = "\n".join(f"{r.decided_room}: {r.pct_of_total:.0f}%" for r in method_rows.itertuples())
+            row.append(cell if cell else "sem dados")
+        fig_rows.append(row)
+
+    # Ao contrário de P1/P2 (no máximo 3 categorias por célula), aqui é
+    # comum uma célula ter as 3 salas + "sem decisão" - matplotlib não
+    # ajusta a altura da linha ao texto com quebras, tem de ser forçado
+    # explicitamente por nº de linhas, ou o texto sobrepõe-se às linhas vizinhas.
+    max_lines = max((cell.count("\n") + 1 for row in fig_rows for cell in row[1:]), default=1)
+    row_scale = 1.4 * max_lines
+    fig, ax = plt.subplots(figsize=(11, 1.5 + 0.55 * max_lines * len(fig_rows)))
+    ax.axis("off")
+    table = ax.table(cellText=fig_rows, colLabels=header, loc="center", cellLoc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.auto_set_column_width(col=list(range(len(header))))
+    table.scale(1, row_scale)
+
+    flag_colors = {"low_n": LOW_N_COLOR, "concentrated": CONCENTRATED_COLOR, "both": BOTH_FLAGS_COLOR}
+    for row_idx, flag in flagged_rows.items():
+        for col in range(len(header)):
+            table[(row_idx + 1, col)].set_facecolor(flag_colors[flag])
+
+    ax.set_title("Distribuição da sala decidida por beacon, campanha inteira (% do total de deteções)")
+    footnote_lines = [
+        "Descritivo, não exatidão - sem ground truth discreto adequado para estes beacons nesta campanha.",
+        "Condição presente em toda a campanha final: três beacons BLE simultaneamente ativos - os resultados "
+        "globais foram obtidos sob esta condição. Sem condição single-beacon de controlo, não é possível "
+        "isolar o efeito do número de beacons.",
+        "n representa o número total de deteções de cada MAC. Os três MACs apresentaram números totais "
+        "de deteções semelhantes, indicando que nenhum beacon ficou sistematicamente ausente da recolha.",
+        "\"Sem decisão\": o método ainda não confirmou sala nesta deteção (ex: aquecimento da persistência).",
+    ]
+    if any(f in ("low_n", "both") for f in flagged_rows.values()):
+        footnote_lines.append(
+            f"* menos de {args.min_observations} observações - convenção para sinalizar poucas "
+            "observações, não um critério de validade estatística."
+        )
+    if any(f in ("concentrated", "both") for f in flagged_rows.values()):
+        footnote_lines.append(
+            f"† mais de {args.concentration_threshold * 100:.0f}% das observações vêm de uma única "
+            "repetição - célula não genuinamente agregada; ver consola para a distribuição completa."
+        )
+    fig.text(0.5, 0.01, "\n".join(footnote_lines), ha="center", fontsize=9, color="#555555")
+
+    _savefig(fig, os.path.join(args.output_dir, f"tabela_multibeacon_{args.label}.png"))
+
+
+# ---------------------------------------------------------------------------
+# Figuras suplementares: apenas apresentam resultados já produzidos nos
+# CSVs. Não recalculam decisões, métricas nem testes estatísticos.
+# ---------------------------------------------------------------------------
+
+def cmd_transition_outcomes_grouped(args):
+    frames = [pd.read_csv(path) for path in args.transition_csv]
+    df = pd.concat(frames, ignore_index=True)
+    required = {"method", "transition_index", "transition_status"}
+    missing = required - set(df.columns)
+    if missing:
+        raise SystemExit(f"transition-outcomes-grouped: colunas em falta: {sorted(missing)}")
+
+    # Cada ficheiro contém cada transição real uma vez por método. A contagem
+    # de transições é validada antes de ser usada só no rótulo do eixo.
+    transitions_by_method = df.groupby("method")["transition_index"].count()
+    if set(transitions_by_method.index) != set(METHODS) or transitions_by_method.nunique() != 1:
+        raise SystemExit("transition-outcomes-grouped: conjunto de transições inconsistente entre métodos")
+    n_real_transitions = int(transitions_by_method.iloc[0])
+
+    series = [
+        ("Confirmada após transição", "confirmed_after_transition", "#2a78d6"),
+        ("Prematura, depois confirmada", "premature_then_confirmed", "#eb6834"),
+        ("Prematura, sem confirmação", "premature_no_confirmation", "#d95087"),
+        ("Transição perdida", "missed_transition", "#8a4fd6"),
+    ]
+    valid_statuses = {status for _, status, _ in series}
+    statuses_present = set(df["transition_status"].dropna().unique())
+    unknown_statuses = statuses_present - valid_statuses
+    if unknown_statuses or df["transition_status"].isna().any():
+        raise SystemExit(
+            "transition-outcomes-grouped: transition_status ausente ou desconhecido: "
+            f"{sorted(unknown_statuses)}"
+        )
+
+    x = np.arange(len(METHODS))
+    fig, ax = plt.subplots(figsize=(11, 7))
+    bottom = np.zeros(len(METHODS), dtype=int)
+    for name, status, color in series:
+        heights = np.array([
+            int(((df["method"] == method) & (df["transition_status"] == status)).sum())
+            for method in METHODS
+        ])
+        bars = ax.bar(x, heights, bottom=bottom, label=name, color=color)
+        ax.bar_label(bars, labels=[str(h) if h else "" for h in heights], label_type="center", fontsize=9)
+        bottom += heights
+    if not np.all(bottom == n_real_transitions):
+        raise SystemExit(
+            "transition-outcomes-grouped: as categorias exclusivas não somam o mesmo número de transições reais"
+        )
+    _method_axis(ax)
+    ax.set_ylabel(f"Número de transições ({n_real_transitions} transições reais)")
+    ax.set_title("Resultados das transições por método — campanha dinâmica final")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2)
+    ax.set_ylim(bottom=0)
+    fig.subplots_adjust(bottom=0.24)
+    _savefig(fig, os.path.join(args.output_dir, f"transicoes_confirmadas_prematuras_perdidas_{args.label}.png"))
+
+
+def cmd_acquisition_validation(args):
+    """Renderiza a comparação piloto a partir dos CSVs de validação existentes."""
+    old_df = pd.read_csv(args.old_detail_csv)
+    final_df = pd.read_csv(args.final_detail_csv)
+    methods = ["median_hysteresis", "median_hysteresis_persistence"]
+
+    old_df = old_df[(old_df["margin"] == args.old_margin) & (old_df["streak"] == args.old_streak)]
+    final_df = final_df[final_df["streak"] == args.final_streak]
+
+    def confirmed_counts(df, context):
+        counts = []
+        for method in methods:
+            rows = df[df["method"] == method]
+            n = len(rows)
+            if n != args.pilot_trials:
+                raise SystemExit(
+                    f"acquisition-validation: {context}, {method}: esperados {args.pilot_trials} pilotos, obtidos {n}"
+                )
+            counts.append(int(rows["corredor_confirmed"].fillna(False).astype(bool).sum()))
+        return counts
+
+    old_values = confirmed_counts(old_df, "aquisição antiga")
+    final_values = confirmed_counts(final_df, "aquisição final")
+    labels = ["Mediana + Histerese", "Mediana + Histerese\n+ Persistência (streak=2)"]
+    x = np.arange(len(labels))
+    width = 0.34
+    fig, ax = plt.subplots(figsize=(12, 7))
+    old = ax.bar(x - width / 2, old_values, width, color="#9aa9ac",
+                 label="Aquisição antiga (scan=5s, upload=2000ms)")
+    final = ax.bar(x + width / 2, final_values, width, color="#32c875",
+                   label="Aquisição final (scan=2s, upload=1000ms)")
+    for bars, values in ((old, old_values), (final, final_values)):
+        for bar, value in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width() / 2, value + 0.1, f"{value}/6",
+                    ha="center", va="bottom", fontsize=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylim(0, 7)
+    ax.set_ylabel(f"Entradas no Corredor confirmadas (de {args.pilot_trials} repetições)")
+    ax.set_title("EXPERIÊNCIA DE VALIDAÇÃO/AFINAÇÃO — efeito da cadência de aquisição\n"
+                 "(6 repetições por condição; as da aquisição final foram posteriormente integradas "
+                 "na campanha dinâmica final)",
+                 color="#a84700", fontweight="bold")
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2)
+    fig.subplots_adjust(bottom=0.27)
+    _savefig(fig, os.path.join(args.output_dir, f"validacao_comparacao_aquisicao_{args.label}.png"))
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1094,6 +1370,44 @@ def main():
                       help="fração acima da qual uma única repetição a dominar a posição marca a linha com † (default: 0.5)")
     add_common(p12)
     p12.set_defaults(func=cmd_doorway_distribution)
+
+    p13 = sub.add_parser("multi-beacon-distribution",
+                          help="Distribuição da sala decidida por MAC, campanha inteira (guião secção 9, 'Vários beacons')")
+    p13.add_argument("--detail-csv", nargs="+", required=True, help="um ou mais raw_with_decisions_<label>.csv")
+    p13.add_argument("--macs", nargs="+", default=None, help="MACs a incluir (default: todos os presentes nos dados)")
+    p13.add_argument("--min-observations", type=int, default=30,
+                      help="abaixo disto, a linha do MAC fica marcada com * (default: 30)")
+    p13.add_argument("--concentration-threshold", type=float, default=0.5,
+                      help="fração acima da qual uma única repetição a dominar o MAC marca a linha com † (default: 0.5)")
+    p13.add_argument("--output-dir", default="report_figures")
+    p13.add_argument("--label", default="fig")
+    p13.set_defaults(func=cmd_multi_beacon_distribution)
+
+    p14 = sub.add_parser("transition-outcomes-grouped",
+                          help="Barras agrupadas de confirmações, decisões prematuras e transições perdidas")
+    p14.add_argument("--transition-csv", nargs="+", required=True,
+                     help="CSVs transition_latencies_ das repetições finais")
+    p14.add_argument("--output-dir", default="report_figures")
+    p14.add_argument("--label", default="fig")
+    p14.set_defaults(func=cmd_transition_outcomes_grouped)
+
+    p15 = sub.add_parser("acquisition-validation",
+                          help="Figura da validação/afinação da cadência, derivada dos CSVs piloto")
+    p15.add_argument("--old-detail-csv", required=True,
+                     help="validation_margin_persistence_sweep_detail.csv da aquisição antiga")
+    p15.add_argument("--final-detail-csv", required=True,
+                     help="validation_fast_acquisition_sweep_detail.csv da aquisição final")
+    p15.add_argument("--old-margin", type=int, default=5,
+                     help="margem da aquisição antiga (default: 5)")
+    p15.add_argument("--old-streak", type=int, default=2,
+                     help="streak da aquisição antiga (default: 2)")
+    p15.add_argument("--final-streak", type=int, default=2,
+                     help="streak da aquisição final (default: 2)")
+    p15.add_argument("--pilot-trials", type=int, default=6,
+                     help="número esperado de ensaios piloto por método (default: 6)")
+    p15.add_argument("--output-dir", default="report_figures")
+    p15.add_argument("--label", default="fig")
+    p15.set_defaults(func=cmd_acquisition_validation)
 
     args = parser.parse_args()
     args.func(args)
