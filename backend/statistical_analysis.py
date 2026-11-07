@@ -193,7 +193,7 @@ def apply_bonferroni(rows, m, alpha=DEFAULT_ALPHA):
     skipped, fica sem correção também, não ganha um "significant" de borla
     só por não ter corrido). m: tamanho FIXO da família de hipóteses
     (nº de pares x nº de métricas testadas em conjunto) - não o nº de
-    testes que happen to ter corrido; uma família pré-definida não encolhe
+    testes que acabaram por correr; uma família pré-definida não encolhe
     só porque alguns pares tiveram pouca sobreposição de dados."""
     out = []
     for row in rows:

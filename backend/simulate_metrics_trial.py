@@ -64,14 +64,9 @@ def main():
 
     def tap(room, note=None):
         post_ground_truth(args.base_url, room, note=note)
-        # The server clock has only 1-second resolution (same as
-        # raw_detections' own "time"), same as everywhere else in this
-        # project (no NTP). A short --delay between readings can otherwise
-        # let a tap and its very next reading land in the same server
-        # second, collapsing that ground-truth interval to zero width and
-        # making it unmatchable - always force a full extra second here,
-        # regardless of --delay, so every tap starts a genuinely distinct
-        # second from whatever reading follows it.
+        # O relógio do servidor tem resolução de 1 s: sem esta pausa, uma
+        # marcação e a leitura seguinte podiam cair no mesmo segundo e o
+        # intervalo de ground truth ficaria com duração zero.
         time.sleep(1.1)
 
     def read(esp_id, rssi):

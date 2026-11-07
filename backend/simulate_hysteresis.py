@@ -36,8 +36,8 @@ AUTH_HEADERS = {"X-User": "simulate_hysteresis"}
 
 
 def setup(base_url):
-    # Best-effort: these can fail harmlessly on repeated runs (mac already
-    # whitelisted, mapping already exists), so errors are ignored here.
+    # Em execuções repetidas estes pedidos podem falhar (MAC ou mapeamento
+    # já existentes); os erros são ignorados.
     try:
         requests.post(f"{base_url}/api/whitelist", json={"mac": MAC}, headers=AUTH_HEADERS, timeout=5)
     except requests.exceptions.RequestException as e:

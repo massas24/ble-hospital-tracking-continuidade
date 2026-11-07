@@ -39,8 +39,8 @@ HYSTERESIS_MARGIN = 5
 
 # Duplicado (não importado) de metrics.TIME_FORMAT/_parse: decision_methods.py
 # é importado por app.py, e metrics.py é deliberadamente nunca importado por
-# app.py (ver CLAUDE.md) - importar aqui furaria essa fronteira só para
-# poupar 2 linhas.
+# app.py (as dependências de análise ficam fora do backend) - importar aqui
+# furaria essa fronteira só para poupar 2 linhas.
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -115,9 +115,8 @@ def decide_hysteresis(detections, margin=HYSTERESIS_MARGIN):
         rejected = False
 
         if state is None or state["room"] == room:
-            # First sighting, or same room as before: accept unconditionally
-            # and refresh the baseline (matches the live code, including not
-            # requiring rssi to be numeric on this branch)
+            # Primeira deteção ou mesma sala: aceita sem condição e atualiza
+            # o RSSI de referência (tal como no app.py, sem exigir RSSI numérico).
             state = {"room": room, "rssi": rssi}
         else:
             stored_rssi = state.get("rssi")
@@ -180,8 +179,8 @@ def decide_median(detections, window=5):
         num_valid = sum(len(v) for v in by_room.values())
 
         if not by_room:
-            # No numeric rssi anywhere in the window: hold the previous
-            # decision (may still be None if none has ever been made)
+            # Janela sem RSSI numérico: mantém a decisão anterior (que pode
+            # ainda ser None).
             decided_room = previous_room
             decided_median_rssi = previous_rssi
         else:
@@ -242,8 +241,7 @@ def decide_persistence(detections, streak=3):
         room = detection.get("room")
 
         if current_decision is None or room != current_decision:
-            # Either still warming up, or this reading challenges the
-            # established decision - both accumulate towards a candidate
+            # Aquecimento ou leitura que contraria a decisão: conta para a candidata.
             if room == candidate_room:
                 candidate_streak += 1
             else:
@@ -255,7 +253,7 @@ def decide_persistence(detections, streak=3):
                 candidate_room = None
                 candidate_streak = 0
         else:
-            # Agrees with the established decision: reset any pending challenger
+            # Concorda com a decisão confirmada: anula a candidata pendente.
             candidate_room = None
             candidate_streak = 0
 

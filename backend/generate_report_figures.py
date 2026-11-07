@@ -41,9 +41,8 @@ plt.rcParams.update({
     "legend.fontsize": 11, "xtick.labelsize": 10, "ytick.labelsize": 10,
 })
 
-# Duplicated from analyze_room_decisions.py (which imports pymongo) rather
-# than imported - same precedent statistical_analysis.py already uses for
-# its own METHODS list.
+# Duplicado de analyze_room_decisions.py em vez de importado, para não
+# depender do pymongo (como a lista METHODS de statistical_analysis.py).
 METHOD_COLORS = {
     "baseline": "#8a4fd6",
     "median": "#eb6834",
@@ -607,10 +606,8 @@ def cmd_scenario_table(args):
             # Replica exatamente a regra de exatidão de
             # metrics.compute_ground_truth_metrics: linha não decidida
             # (estimated_room None) com ground truth conhecido conta
-            # como errada, nunca é excluída do denominador. Confirmado
-            # empiricamente (não só por leitura de código) que esta é a
-            # MESMA convenção usada em decision_summary_<label>.csv's
-            # accuracy - ver Contexto do plano.
+            # como errada, nunca é excluída do denominador - a mesma
+            # convenção da accuracy em decision_summary_<label>.csv.
             correct = (sub[f"{method}_room"] == sub["ground_truth_room"]).sum()
             row.append(f"{correct / total * 100:.1f}%" if total else "sem dados")
         rows.append(row)
@@ -806,9 +803,8 @@ def cmd_trial_type_summary(args):
                     r.num_transitions / duration_min if duration_min else None
                 )
                 num_false = r.num_false_movements
-                # A false movement is always also a transition, never the
-                # reverse - violating this means one of the two counts has
-                # a bug, not that the trial is unusually unstable.
+                # Um falso movimento é sempre também uma transição; o
+                # contrário indica um erro numa das duas contagens.
                 if pd.notna(num_false) and pd.notna(r.num_transitions) and num_false > r.num_transitions:
                     invariant_violations.append(
                         f"{experiment_id} ({r.mac}, {r.method}): num_false_movements={num_false} > "
